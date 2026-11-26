@@ -129,6 +129,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
       if (r.state === "needs_driver" && t - now < H && t > now) out.push({ tone: "needs_driver", text: `${r.reference} sin chofer · búsqueda ${fmtTime(r.agreedPickupAt)}`, row: r });
       if (r.state === "held" && r.holdExpiresAt) out.push({ tone: "held", text: `${r.reference} hold vence ${fmtTime(r.holdExpiresAt)}`, row: r });
       if (r.flightExceptionReason) out.push({ tone: "warn", text: `${r.reference} sin vuelo: ${r.flightExceptionReason}`, row: r });
+      if (r.state === "needs_driver" && r.autoDispatch) out.push({ tone: "warn", text: `${r.reference} oferta automática · ronda ${r.autoRounds}`, row: r });
     }
     return out;
   }, [rows, cfg]);
@@ -184,6 +185,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
           <h1 className="text-lg font-semibold first-letter:uppercase">{fmtLocalDate(date)}</h1>
           <Stat n={counts.total} label="viajes" />
           <Stat n={counts.needs} label="sin chofer" tone="text-amber-300" />
+          <Stat n={rows.filter((r) => r.onBoard).length} label="en la bolsa" tone="text-sky-300" />
           <Stat n={counts.held} label="en hold" tone="text-sky-300" />
           <Stat n={counts.confirmed} label="confirmados" tone="text-emerald-300" />
         </div>
@@ -368,7 +370,8 @@ function BookingsGrid({ rows, onSelect }: { rows: DispatchRow[]; onSelect: (r: D
             <tr key={r.id} onClick={() => onSelect(r)} className={cx("cursor-pointer hover:bg-ink-900", r.state === "cancelled" && "opacity-50")}>
               <td className="px-3 py-2.5 font-semibold tabular-nums">{fmtTime(r.agreedPickupAt)}</td>
               <td className="px-3 py-2.5 font-mono text-xs">{r.reference}</td>
-              <td className="px-3 py-2.5"><Badge tone={r.state}>{STATE_ES[r.state]}</Badge></td>
+              <td className="px-3 py-2.5"><Badge tone={r.state}>{STATE_ES[r.state]}</Badge>
+                {(() => { const bl = boardLabel(r); return bl && r.state === "needs_driver" ? <div className="mt-1"><Badge tone={bl.tone}>{bl.text}</Badge></div> : null; })()}</td>
               <td className="px-3 py-2.5">
                 <span className="font-mono text-xs text-ink-300">{r.direction === "from_airport" ? `${r.airport} → ` : ""}</span>
                 {r.zoneName}
@@ -401,6 +404,15 @@ const ERR_ES: Record<string, string> = {
   reason_required: "Indicá un motivo.", booking_closed: "La reserva ya está cerrada o cancelada.", no_active_driver: "La reserva no tiene chofer activo.",
   forbidden: "Tu usuario no tiene permiso de despacho.", live_only: "Disponible solo en modo en vivo (con Supabase).",
 };
+function boardLabel(r: DispatchRow): { tone: string; text: string } | null {
+  if (r.state !== "needs_driver") return r.claimSource === "board" ? { tone: "neutral", text: "Tomado de la bolsa" } : null;
+  if (r.boardHold) return { tone: "neutral", text: "Retenido por despacho" };
+  if (r.autoDispatch) return { tone: "warn", text: `Oferta automática · ronda ${r.autoRounds}${r.openOffers ? ` · ${r.openOffers} abierta(s)` : ""}` };
+  if (r.onBoard) return { tone: "held", text: "En la bolsa" };
+  if (r.openOffers) return { tone: "warn", text: `Ofertado · ${r.openOffers} abierta(s)` };
+  return { tone: "needs_driver", text: "Sin publicar" };
+}
+
 const errText = (e: unknown) => (e instanceof CommandError ? ERR_ES[e.code] ?? e.message : (e as Error).message);
 
 function BookingActions({ r, drivers, board, onChanged }: { r: DispatchRow; drivers: Driver[]; board: BoardRow[]; onChanged: () => void }) {
@@ -442,6 +454,15 @@ function BookingActions({ r, drivers, board, onChanged }: { r: DispatchRow; driv
         </Button>
       </div>
       {open && (
+        <div className="flex flex-wrap gap-2">
+          {r.boardHold || !r.onBoard
+            ? <Button variant="outline" className="py-2 text-xs" disabled={busy} onClick={() => run(() => backend.boardAction(r.id, "publish", r.version), "Publicado en la bolsa.")}>Publicar en la bolsa</Button>
+            : <Button variant="outline" className="py-2 text-xs" disabled={busy} onClick={() => run(() => backend.boardAction(r.id, "hold", r.version), "Retenido fuera de la bolsa.")}>Retener (sacar de la bolsa)</Button>}
+          {!r.autoDispatch && <Button variant="outline" className="py-2 text-xs" disabled={busy} onClick={() => run(() => backend.boardAction(r.id, "auto", r.version), "Ofreciendo automáticamente a los más cercanos.")}>Oferta automática (más cercanos)</Button>}
+          {r.autoDispatch && <Button variant="outline" className="py-2 text-xs" disabled={busy} onClick={() => run(() => backend.boardAction(r.id, "hold", r.version), "Oferta automática detenida.")}>Detener oferta automática</Button>}
+        </div>
+      )}
+      {open && (
         <div className="flex items-center gap-2">
           <span className="text-sm text-ink-300">Ofrecer a los</span>
           <div className="w-20"><Input type="number" min={1} max={10} value={group} onChange={(e) => setGroup(Math.max(1, Math.min(10, Number(e.target.value) || 1)))} className="py-2" aria-label="Cantidad" /></div>
@@ -476,7 +497,8 @@ function BookingDrawer({ row: r, drivers, board, onChanged, onClose }: { row: Di
         <div className="flex items-start justify-between">
           <div>
             <div className="font-mono text-xl font-bold text-cab-400">{r.reference}</div>
-            <div className="mt-1 flex gap-2"><Badge tone={r.state}>{STATE_ES[r.state]}</Badge><Badge>{SOURCE_ES[r.source]}</Badge>{r.locale === "en" && <Badge>EN</Badge>}</div>
+            <div className="mt-1 flex flex-wrap gap-2"><Badge tone={r.state}>{STATE_ES[r.state]}</Badge><Badge>{SOURCE_ES[r.source]}</Badge>{r.locale === "en" && <Badge>EN</Badge>}
+              {(() => { const bl = boardLabel(r); return bl ? <Badge tone={bl.tone}>{bl.text}</Badge> : null; })()}</div>
           </div>
           <button onClick={onClose} className="text-2xl text-ink-400 hover:text-white" aria-label="Cerrar">×</button>
         </div>
@@ -484,7 +506,7 @@ function BookingDrawer({ row: r, drivers, board, onChanged, onClose }: { row: Di
         <dl className="mt-5 divide-y divide-ink-800 text-sm">
           <div className={item}><dt className="text-ink-400">{L.pickup}</dt><dd className="font-semibold">{fmtDateTime(r.agreedPickupAt)}{r.proposedPickupAt && <span className="ml-2 text-amber-300">→ {fmtTime(r.proposedPickupAt)}?</span>}</dd></div>
           <div className={item}><dt className="text-ink-400">Desde</dt><dd>{r.pickupPlace.label} <a className="ml-1 text-xs text-cab-400" href={mapsUrl(r.pickupPlace.label)} target="_blank" rel="noreferrer">mapa</a>
-            {r.pickupPlace.originalText && r.pickupPlace.originalText !== r.pickupPlace.label && <div className="text-xs text-ink-400">Texto original: “{r.pickupPlace.originalText}”</div>}</dd></div>
+            {(r.pickupPlace as { kind?: string }).kind !== "airport" && r.pickupPlace.originalText && r.pickupPlace.originalText !== r.pickupPlace.label && <div className="text-xs text-ink-400">Texto original: “{r.pickupPlace.originalText}”</div>}</dd></div>
           <div className={item}><dt className="text-ink-400">Hasta</dt><dd>{r.dropoffPlace.label} <a className="ml-1 text-xs text-cab-400" href={mapsUrl(r.dropoffPlace.label)} target="_blank" rel="noreferrer">mapa</a></dd></div>
           <div className={item}><dt className="text-ink-400">{L.flight}</dt><dd className="font-mono">{r.flightDesignator ? `${r.flightDesignator} · llegada ${r.flightLocalArrivalDate}` : r.flightExceptionReason ? `Excepción: ${r.flightExceptionReason}` : "—"}</dd></div>
           <div className={item}><dt className="text-ink-400">{L.vehicle}</dt><dd>{VC_ES[r.vehicleClass]} · {r.passengers} pax · {r.largeBags} valijas · {r.carryOn} mano</dd></div>

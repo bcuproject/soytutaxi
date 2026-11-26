@@ -104,6 +104,13 @@ export interface DispatchRow {
   driverName: string | null;
   vehicleId: string | null;
   vehiclePlate: string | null;
+  boardHold: boolean;
+  boardClosedAt: string | null;
+  autoDispatch: boolean;
+  autoRounds: number;
+  onBoard: boolean;
+  claimSource: "staff" | "offer" | "board" | null;
+  openOffers: number;
 }
 
 let seq = 0;
@@ -228,6 +235,10 @@ export class MemoryStore implements Store {
         assignmentId: s?.id ?? null, assignmentState: s?.state ?? null, tripStage: s?.tripStage ?? null,
         holdExpiresAt: s?.holdExpiresAt ?? null, driverId: d?.id ?? null, driverName: d?.fullName ?? null,
         vehicleId: v?.id ?? null, vehiclePlate: v?.plate ?? null,
+        boardHold: false, boardClosedAt: null, autoDispatch: false, autoRounds: 0,
+        // Demo approximation of app.on_board(): needs a driver and pickup more than 12 h away.
+        onBoard: b.state === "needs_driver" && new Date(b.journey.pickupAt).getTime() > this.clock().getTime() + 12 * 3600_000,
+        claimSource: s ? ("staff" as const) : null, openOffers: 0,
       };
     }).sort((a, b) => a.agreedPickupAt.localeCompare(b.agreedPickupAt));
   }

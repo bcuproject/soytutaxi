@@ -3,8 +3,8 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import type { TripStage } from "@shared/domain/types.ts";
 import { Badge, Button, Field, Input, Logo } from "../components/ui";
 import { Radio } from "../components/Radio";
-import { backend, CommandError, type DriverJob, type DriverMe, type DriverOffer, type StaffSession } from "../lib/backend";
-import { cx, fmtDateShort, fmtTime, formatMoney } from "../lib/format";
+import { backend, CommandError, type DriverJob, type DriverMe, type DriverOffer, type JobBoard, type StaffSession } from "../lib/backend";
+import { cx, fmtDateShort, fmtLocalDate, fmtTime, formatMoney } from "../lib/format";
 
 const SEND_EVERY_MS = 15_000;
 const NEXT: Partial<Record<TripStage, { stage: TripStage; label: string }>> = {
@@ -22,6 +22,9 @@ const ERR: Record<string, string> = {
   outside_working_hours: "Ese viaje está fuera de tu horario.", vehicle_too_small: "Tu vehículo no alcanza para ese viaje.",
   not_a_driver: "Tu usuario no está vinculado a un chofer aprobado. Avisá a despacho.",
   invalid_transition: "Ese paso no corresponde ahora.", live_only: "La app de choferes funciona solo en modo en vivo.",
+  claim_limit_reached: "Ya tenés el máximo de viajes de la bolsa para ese día.",
+  release_window_closed: "Faltan menos de 24 h: pedile a despacho que lo reasigne.", job_in_progress: "El viaje ya empezó.",
+  no_vehicle_allocated: "No tenés vehículo asignado para ese horario.",
 };
 const errMsg = (e: unknown) => (e instanceof CommandError ? ERR[e.code] ?? e.message : navigator.onLine ? "Error inesperado." : "Sin conexión. Reintentá cuando vuelva la señal.");
 
@@ -75,7 +78,8 @@ function Driver({ onSignOut }: { onSignOut: () => void }) {
   const [me, setMe] = useState<DriverMe | null>(null);
   const [offers, setOffers] = useState<DriverOffer[]>([]);
   const [jobs, setJobs] = useState<DriverJob[]>([]);
-  const [tab, setTab] = useState<"jobs" | "offers" | "radio" | "earnings">("jobs");
+  const [tab, setTab] = useState<"jobs" | "board" | "offers" | "radio" | "earnings">("jobs");
+  const [jobBoard, setJobBoard] = useState<JobBoard | null>(null);
   const [fatal, setFatal] = useState<string | null>(null);
   const [toast, setToast] = useState<{ ok: boolean; text: string } | null>(null);
   const [syncedAt, setSyncedAt] = useState<Date | null>(null);
@@ -85,8 +89,8 @@ function Driver({ onSignOut }: { onSignOut: () => void }) {
 
   const refresh = useCallback(async () => {
     try {
-      const [m, o, j] = await Promise.all([backend.driverMe(), backend.driverOffers(), backend.driverJobs()]);
-      setMe(m); setOffers(o); setJobs(j); setSyncedAt(new Date()); setFatal(null);
+      const [m, o, j, bd] = await Promise.all([backend.driverMe(), backend.driverOffers(), backend.driverJobs(), backend.jobBoard()]);
+      setMe(m); setOffers(o); setJobs(j); setJobBoard(bd); setSyncedAt(new Date()); setFatal(null);
     } catch (e) {
       if (e instanceof CommandError && (e.code === "not_a_driver" || e.code === "live_only")) setFatal(errMsg(e));
     }
@@ -152,6 +156,7 @@ function Driver({ onSignOut }: { onSignOut: () => void }) {
             )}
             {upcoming.length > 0 && <h2 className="mb-2 mt-6 text-xs font-semibold uppercase tracking-wide text-ink-400">Próximos</h2>}
             {upcoming.map((j) => <JobCard key={j.assignmentId} job={j} now={now} busy={busy} act={act} />)}
+            {current?.canDrop && <p className="-mt-1 mb-2 text-center text-[11px] text-ink-500">Podés devolver un viaje a la bolsa hasta {jobBoard?.releaseUntilHours ?? 24} h antes.</p>}
             {done.length > 0 && <h2 className="mb-2 mt-6 text-xs font-semibold uppercase tracking-wide text-ink-400">Terminados hoy</h2>}
             {done.map((j) => (
               <div key={j.assignmentId} className="mb-2 flex justify-between rounded-xl border border-ink-800 px-4 py-2 text-sm text-ink-400">
@@ -159,6 +164,50 @@ function Driver({ onSignOut }: { onSignOut: () => void }) {
               </div>
             ))}
           </>
+        )}
+
+        {tab === "board" && jobBoard && (
+          <div className="space-y-2" data-testid="board">
+            <p className="mb-3 text-xs text-ink-400">
+              Viajes anticipados para elegir. Máximo {jobBoard.maxPerDay} por día. Los datos del pasajero aparecen al tomarlo.
+              Si nadie lo toma, {jobBoard.escalateHours} h antes se ofrece al chofer más cercano.
+            </p>
+            {!jobBoard.jobs.length && <p className="rounded-2xl border border-ink-800 p-6 text-center text-ink-400">No hay viajes en la bolsa para tu vehículo y horario.</p>}
+            {jobBoard.jobs.map((b, i) => {
+              const newDay = i === 0 || jobBoard.jobs[i - 1].pickupLocalDate !== b.pickupLocalDate;
+              const held = jobBoard.claimsByDay[b.pickupLocalDate] ?? 0;
+              const full = held >= jobBoard.maxPerDay;
+              return (
+                <div key={b.bookingId}>
+                  {newDay && (
+                    <h2 className="mb-2 mt-4 flex justify-between text-xs font-semibold uppercase tracking-wide text-ink-400">
+                      <span className="first-letter:uppercase">{fmtLocalDate(b.pickupLocalDate)}</span>
+                      <span className={full ? "text-amber-300" : ""}>tomados {held}/{jobBoard.maxPerDay}</span>
+                    </h2>
+                  )}
+                  <div className="flex items-center gap-3 rounded-2xl border border-ink-800 bg-ink-900 p-3">
+                    <div className="w-14 text-center">
+                      <div className="text-lg font-bold tabular-nums">{fmtTime(b.pickupAt)}</div>
+                      <div className="text-[10px] text-ink-400">~{b.estDurationMin} min</div>
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium">{b.direction === "from_airport" ? `${b.airport} → ${b.zone}` : `${b.zone} → ${b.airport}`}</div>
+                      <div className="truncate text-xs text-ink-400">{b.passengers} pas. · {b.largeBags} valijas{b.flight ? ` · ${b.flight}` : ""}</div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-sm font-bold text-cab-400">{formatMoney(b.earningsMinor, b.currency, "es-AR")}</div>
+                      <Button className="mt-1 px-3 py-1.5 text-xs" disabled={busy || full} data-testid="claim"
+                        onClick={() => act(async () => {
+                          const r = await backend.claim(b.bookingId);
+                          if (r.outcome === "claimed") { say(true, "¡Viaje tuyo! Lo ves en Trabajos."); }
+                          else say(false, r.outcome === "already_taken" ? "Otro chofer lo tomó primero." : "Ese viaje ya no está en la bolsa.");
+                        })}>{full ? "Límite" : "Tomar"}</Button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         )}
 
         {tab === "offers" && (
@@ -222,10 +271,10 @@ function Driver({ onSignOut }: { onSignOut: () => void }) {
       </main>
 
       <nav className="fixed inset-x-0 bottom-0 z-20 border-t border-ink-800 bg-ink-950/95 backdrop-blur">
-        <div className="mx-auto grid max-w-md grid-cols-4">
-          {([["jobs", "Trabajos", jobs.filter(active).length], ["offers", "Ofertas", offers.length], ["radio", "Radio", 0], ["earnings", "Ganancias", 0]] as const).map(([k, l, n]) => (
-            <button key={k} onClick={() => setTab(k)} className={cx("relative py-4 text-sm font-semibold", tab === k ? "text-cab-400" : "text-ink-400")}>
-              {l}{n > 0 && <span className="absolute right-3 top-2 grid h-5 min-w-5 place-items-center rounded-full bg-cab-500 px-1 text-[11px] text-ink-950">{n}</span>}
+        <div className="mx-auto grid max-w-md grid-cols-5">
+          {([["jobs", "Trabajos", jobs.filter(active).length], ["board", "Bolsa", jobBoard?.jobs.length ?? 0], ["offers", "Ofertas", offers.length], ["radio", "Radio", 0], ["earnings", "Ganancias", 0]] as const).map(([k, l, n]) => (
+            <button key={k} onClick={() => setTab(k)} className={cx("relative py-4 text-[13px] font-semibold", tab === k ? "text-cab-400" : "text-ink-400")}>
+              {l}{n > 0 && <span className="absolute right-1 top-1.5 grid h-5 min-w-5 place-items-center rounded-full bg-cab-500 px-1 text-[11px] text-ink-950">{n}</span>}
             </button>
           ))}
         </div>
@@ -242,6 +291,7 @@ const active = (j: DriverJob) => j.tripStage !== "complete" && j.tripStage !== "
 function JobCard({ job: j, now, busy, act, primary = false }: {
   job: DriverJob; now: number; busy: boolean; act: (fn: () => Promise<unknown>, ok?: string) => void; primary?: boolean;
 }) {
+  const [confirmDrop, setConfirmDrop] = useState(false);
   const next = NEXT[j.tripStage];
   const target = j.tripStage === "onboard" ? j.dropoff : j.pickup;
   const q = encodeURIComponent(target.lat != null && target.lng != null ? `${target.lat},${target.lng}` : `${target.label}, Buenos Aires`);
@@ -253,7 +303,10 @@ function JobCard({ job: j, now, busy, act, primary = false }: {
           <div className={cx("font-bold tabular-nums", primary ? "text-3xl" : "text-xl")}>{fmtTime(j.pickupAt)}</div>
           <div className="text-xs text-ink-400">{mins > 0 ? `en ${mins >= 120 ? Math.round(mins / 60) + " h" : mins + " min"}` : "ahora"} · <span className="font-mono">{j.reference}</span></div>
         </div>
-        <Badge tone={j.state === "reserving" ? "held" : "confirmed"}>{j.state === "reserving" ? "Esperando pago" : STAGE_ES[j.tripStage]}</Badge>
+        <div className="flex flex-col items-end gap-1">
+          <Badge tone={j.state === "reserving" ? "held" : "confirmed"}>{j.state === "reserving" ? "Esperando pago" : STAGE_ES[j.tripStage]}</Badge>
+          {j.claimSource === "board" && <span className="text-[10px] text-ink-500">de la bolsa</span>}
+        </div>
       </div>
       <dl className="mt-3 space-y-1.5 text-sm">
         <div><dt className="inline text-ink-400">Desde: </dt><dd className="inline">{j.pickup.label}</dd></div>
@@ -278,6 +331,17 @@ function JobCard({ job: j, now, busy, act, primary = false }: {
           onClick={() => act(() => backend.progress(j.assignmentId, next.stage, j.version), next.stage === "complete" ? "Viaje terminado. ¡Gracias!" : undefined)}>
           {next.label}
         </Button>
+      )}
+      {j.canDrop && (
+        confirmDrop ? (
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            <Button variant="ghost" onClick={() => setConfirmDrop(false)}>No</Button>
+            <Button variant="outline" className="border-red-500/40 text-red-300" disabled={busy}
+              onClick={() => act(() => backend.giveBack(j.assignmentId), "Viaje devuelto a la bolsa.")}>Sí, devolver</Button>
+          </div>
+        ) : (
+          <button className="mt-2 w-full text-center text-xs text-ink-400 hover:text-white" onClick={() => setConfirmDrop(true)}>Devolver a la bolsa</button>
+        )
       )}
       {primary && j.state === "confirmed" && j.tripStage === "at_pickup" && (
         <Button variant="ghost" className="mt-1 w-full text-red-300" disabled={busy}

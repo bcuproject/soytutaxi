@@ -59,6 +59,10 @@ export interface Backend {
   respondOffer(offerId: string, accept: boolean): Promise<{ outcome: string }>;
   driverJobs(): Promise<DriverJob[]>;
   progress(assignmentId: string, stage: TripStage, version: number): Promise<void>;
+  jobBoard(): Promise<JobBoard>;
+  claim(bookingId: string): Promise<{ outcome: string }>;
+  giveBack(assignmentId: string, reason?: string): Promise<{ outcome: string; on_board: boolean }>;
+  boardAction(bookingId: string, action: "hold" | "publish" | "auto", version: number): Promise<void>;
 
   // --- Walkie-talkie -----------------------------------------------------------------------------
   radioToken(): Promise<{ url: string; token: string; room: string; name: string }>;
@@ -94,6 +98,13 @@ export interface DriverOffer {
   passengers: number; largeBags: number; carryOn: number; vehicleClass: string; estDurationMin: number; flight: string | null;
 }
 
+export interface BoardJob {
+  bookingId: string; pickupAt: string; pickupLocalDate: string; direction: "from_airport" | "to_airport";
+  airport: string; zone: string | null; flight: string | null; passengers: number; largeBags: number; carryOn: number;
+  vehicleClass: string; estDurationMin: number; earningsMinor: number; currency: string;
+}
+export interface JobBoard { maxPerDay: number; releaseUntilHours: number; escalateHours: number; claimsByDay: Record<string, number>; jobs: BoardJob[] }
+
 export interface DriverJob {
   assignmentId: string; version: number; state: string; tripStage: TripStage; holdExpiresAt: string | null;
   reference: string; bookingState: string; direction: "from_airport" | "to_airport"; airport: string; meetingPoint: string;
@@ -101,6 +112,7 @@ export interface DriverJob {
   zone: string | null; pickupAt: string; proposedPickupAt: string | null; estDurationMin: number;
   passengers: number; largeBags: number; carryOn: number; vehicleClass: string; flight: string | null; notes: string | null;
   paymentMode: string; collectionState: string; amountMinor: number | null; currency: string | null; earningsMinor: number | null;
+  claimSource: "staff" | "offer" | "board" | null; canDrop: boolean;
   passenger: { name: string; phone: string | null; locale: string };
 }
 
@@ -216,6 +228,10 @@ class DemoBackend implements Backend {
   async respondOffer(): Promise<{ outcome: string }> { throw LIVE_ONLY(); }
   async driverJobs(): Promise<DriverJob[]> { throw LIVE_ONLY(); }
   async progress(): Promise<void> { throw LIVE_ONLY(); }
+  async jobBoard(): Promise<JobBoard> { throw LIVE_ONLY(); }
+  async claim(): Promise<{ outcome: string }> { throw LIVE_ONLY(); }
+  async giveBack(): Promise<{ outcome: string; on_board: boolean }> { throw LIVE_ONLY(); }
+  async boardAction(): Promise<void> { throw LIVE_ONLY(); }
   async radioToken(): Promise<{ url: string; token: string; room: string; name: string }> { throw LIVE_ONLY(); }
 }
 
@@ -327,6 +343,14 @@ class SupabaseBackend implements Backend {
   async driverJobs() { return this.rpc<DriverJob[]>("driver_jobs"); }
   async progress(assignmentId: string, stage: TripStage, version: number) {
     await this.rpc("driver_trip_progress", { p_assignment: assignmentId, p_stage: stage, p_expected_version: version });
+  }
+  async jobBoard() { return this.rpc<JobBoard>("driver_board"); }
+  async claim(bookingId: string) { return this.rpc<{ outcome: string }>("driver_claim", { p_booking: bookingId }); }
+  async giveBack(assignmentId: string, reason?: string) {
+    return this.rpc<{ outcome: string; on_board: boolean }>("driver_release_claim", { p_assignment: assignmentId, p_reason: reason ?? null });
+  }
+  async boardAction(bookingId: string, action: "hold" | "publish" | "auto", version: number) {
+    await this.rpc("dispatch_board", { p_booking: bookingId, p_action: action, p_expected_version: version });
   }
   async radioToken() {
     const { data } = await this.sb.auth.getSession();

@@ -27,6 +27,14 @@ This release is the dispatch backend and web front end for Buenos Aires transfer
 - **Limits of a web app:** GPS and radio work while the app is open on screen. iOS stops both in the background or when locked. A native wrapper is the upgrade path if that isn't enough.
 - **Onboarding:** create the user in Supabase Auth, then run `select app.grant_role_by_email('soytutaxi','email','dispatcher');` for staff or `select app.link_driver_by_email('<driver uuid>','email');` for drivers.
 
+## Job board (advance airport jobs) + nearest-first for urgent jobs
+
+- **Board:** a booking that needs a driver and is more than `max(board_min_lead_hours=6, board_escalate_hours_before=12)` hours away appears in the driver app's **Bolsa** tab. Each driver only sees jobs that fit their vehicle and hours and don't clash with their schedule, with no passenger contact or exact address. **Tomar** uses the same race-safe allocation (one winner). There is a cap of `board_max_claims_per_day=4` board jobs per driver per local day.
+- **Giving a job back:** a driver may return a claimed job until `board_release_until_hours_before=24` hours before pickup. It goes back on the board and dispatch gets a warning. After that point only dispatch can reassign it.
+- **Urgent and unclaimed jobs:** once inside the 12-hour window (or booked inside it), `app.escalate_board()` (pg_cron, every 2 min) offers the job to the nearest eligible drivers in rounds. Each round skips drivers who declined or let an offer expire. Dispatch is alerted when this starts, critically when no eligible driver is left, and again after `auto_dispatch_max_rounds=5`.
+- **Dispatch control:** the booking drawer can **Retener** (keep off the board), **Publicar en la bolsa**, start or stop **Oferta automática**, offer manually or assign directly. The grid and drawer show the board status.
+- All numbers are optional policy keys. If a key is absent, the default applies.
+
 ## Live staging (26 Nov 2026)
 
 - Supabase project `soytutaxi` (ref `sxjhtsyguacfyixaeydz`, São Paulo). Migrations and demo data applied, `api` Edge Function deployed (`verify_jwt = false`).
@@ -48,7 +56,7 @@ npm run dev            # demo mode on http://localhost:5173
 
 ```bash
 npm test               # 42 unit tests: domain, API handler (MemoryStore), LiveKit tokens
-npm run test:db        # 32 integration tests on real PostgreSQL (Phase 1 + Phase 2)
+npm run test:db        # 42 integration tests on real PostgreSQL (Phase 1, Phase 2, job board)
 npm run build && npx vite preview --port 4173 & npm run test:e2e   # browser smoke test (needs Chrome)
 deno check supabase/functions/api/index.ts
 ```
