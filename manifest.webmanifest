@@ -1,0 +1,15 @@
+{
+  "name": "SoyTuTaxi Choferes",
+  "short_name": "SoyTuTaxi",
+  "description": "App de choferes de SoyTuTaxi: turnos, ofertas, viajes, radio y ganancias.",
+  "start_url": "./chofer",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a0a0a",
+  "theme_color": "#0a0a0a",
+  "lang": "es-AR",
+  "icons": [
+    { "src": "favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
