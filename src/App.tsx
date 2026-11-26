@@ -6,6 +6,7 @@ import { backend, type StaffSession } from "./lib/backend";
 import { LocaleContext, makeT } from "./lib/i18n";
 import BookingPage from "./pages/BookingPage";
 import DispatchPage from "./pages/DispatchPage";
+import DriverApp from "./pages/DriverApp";
 import StatusPage from "./pages/StatusPage";
 
 function initialLocale(): Locale {
@@ -64,6 +65,7 @@ export default function App() {
         <Route path="/" element={<PassengerShell><BookingPage /></PassengerShell>} />
         <Route path="/reserva/:ref" element={<PassengerShell><StatusPage /></PassengerShell>} />
         <Route path="/despacho" element={<DispatchPage />} />
+        <Route path="/chofer" element={<DriverApp />} />
         <Route path="/despacho/nueva" element={<StaffOnly><div className="min-h-screen"><BookingPage staff /></div></StaffOnly>} />
         <Route path="*" element={<PassengerShell><div className="py-24 text-center text-ink-400">404</div></PassengerShell>} />
       </Routes>

@@ -17,6 +17,16 @@ This release is the dispatch backend and web front end for Buenos Aires transfer
 | Dispatch | Spanish-first. Daily **Agenda** (timeline per driver plus an unassigned lane), **Reservas** grid, and filters by date, airport, state, driver, payment and free text. Also an alerts strip (unassigned near pickup, expiring holds, flight exceptions), a booking drawer with original address text, map links and event history, and a staff-entered booking form that allows a no-flight exception with a reason. |
 | Seed | Generated from one TypeScript fixtures file (`scripts/gen-seed.ts`), so the demo backend and the DB seed cannot drift. Seed data: 3 vehicle classes (capacities from soytutaxi.com), EZE/AEP with meeting points, 6 zones, 55 demo fare rules, 6 vehicles, 7 drivers and 8 bookings relative to "today". |
 
+## Phase 2 — driver operations, live map, walkie-talkie
+
+- **Driver app** at `/chofer` (installable from the browser). Drivers can start and end a shift, share GPS every ~15 s while on shift (the screen is kept awake), and accept or decline offers with a countdown. Their jobs show the passenger and a navigation link, and they record trip progress (on the way → at pickup → passenger on board → done, or no-show). The app also shows earnings and cash still to hand in, and has the radio.
+- **Dispatch** gets a **Mapa** tab: OpenStreetMap with live car positions coloured by status (free / heading to pickup / with passenger / no signal / off shift). Positions arrive over Supabase Realtime. Each booking now has assign / reassign, offer to the N closest drivers, release and cancel actions. These take the expected version and give actionable errors (stale data, schedule conflict, out of hours, vehicle too small).
+- **Rules in the database** (`20261126000003_driver_operations.sql`): one transactional allocation path for both staff assignment and driver acceptance. It locks booking → driver → vehicle and rechecks eligibility (approval, allocated vehicle, capacity, working hours, unavailability). The overlap exclusion constraints decide races. Offers have generations and expire on the database clock (`pg_cron` every minute). Earnings are recorded once per completed trip and cash separately. Staff see a driver's location only while that driver is on shift.
+- **Payments not live yet:** prepaid trips go straight to *confirmed* when a driver is assigned, with collection still *awaiting payment*. Setting `"payments_enabled": true` in a new policy version switches on the hold → pay → confirm flow (Phase 4).
+- **Walkie-talkie:** the `radio` Edge Function issues LiveKit tokens for one shared channel (`soytutaxi-radio`) to dispatchers and on-shift drivers. Hold to talk. It needs the secrets `LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` (the existing BCU LiveKit; its agent only joins rooms it is dispatched to as `bcu-taxi`, so it won't enter the radio room).
+- **Limits of a web app:** GPS and radio work while the app is open on screen. iOS stops both in the background or when locked. A native wrapper is the upgrade path if that isn't enough.
+- **Onboarding:** create the user in Supabase Auth, then run `select app.grant_role_by_email('soytutaxi','email','dispatcher');` for staff or `select app.link_driver_by_email('<driver uuid>','email');` for drivers.
+
 ## Live staging (26 Nov 2026)
 
 - Supabase project `soytutaxi` (ref `sxjhtsyguacfyixaeydz`, São Paulo). Migrations and demo data applied, `api` Edge Function deployed (`verify_jwt = false`).
@@ -37,8 +47,8 @@ npm run dev            # demo mode on http://localhost:5173
 ## Tests
 
 ```bash
-npm test               # 40 unit tests: domain + API handler (MemoryStore)
-npm run test:db        # 17 integration tests on real PostgreSQL (tested on 16)
+npm test               # 42 unit tests: domain, API handler (MemoryStore), LiveKit tokens
+npm run test:db        # 32 integration tests on real PostgreSQL (Phase 1 + Phase 2)
 npm run build && npx vite preview --port 4173 & npm run test:e2e   # browser smoke test (needs Chrome)
 deno check supabase/functions/api/index.ts
 ```

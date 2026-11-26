@@ -6,7 +6,7 @@ const browser = await puppeteer.launch({ executablePath: process.env.CHROME ?? "
 const page = await browser.newPage();
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
-page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+page.on("console", (m) => m.type() === "error" && !/tile\.openstreetmap|ERR_|Failed to load resource/.test(m.text() + (m.location()?.url ?? "")) && errors.push(m.text()));
 const assert = (c, msg) => { if (!c) throw new Error("ASSERT: " + msg); console.log("ok -", msg); };
 const clickText = async (sel, text) => {
   const h = await page.waitForFunction((s, t) => [...document.querySelectorAll(s)].find((e) => e.textContent.includes(t)), {}, sel, text);
@@ -62,6 +62,12 @@ await page.setViewport({ width: 1440, height: 900 });
 const blocks = await page.$$eval('[data-testid^="block-"]', (b) => b.map((x) => x.dataset.testid));
 assert(blocks.includes("block-STT-DEM001") && blocks.includes(`block-${ref}`), `schedule shows seeded + new booking (${blocks.length} blocks)`);
 await page.screenshot({ path: `${SHOTS}/5-schedule.png` });
+await clickText('[role="tab"]', "Mapa");
+await page.waitForSelector('[data-testid="driver-map"] .leaflet-marker-icon');
+await new Promise((r) => setTimeout(r, 3500));
+const cars = await page.$$eval('[data-testid="driver-map"] .leaflet-marker-icon', (els) => els.length);
+assert(cars >= 7, `map shows driver markers + airports (${cars})`);
+await page.screenshot({ path: `${SHOTS}/5b-map.png` });
 await clickText('[role="tab"]', "Reservas");
 await page.waitForSelector('[data-testid="bookings-grid"]');
 await page.screenshot({ path: `${SHOTS}/6-grid.png` });

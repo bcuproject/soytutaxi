@@ -5,3 +5,11 @@
 :root { color-scheme: dark; }
 body { font-feature-settings: "cv11", "ss01"; }
 select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238a8a8a' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 1rem center; }
+
+/* Dark rendering of standard OpenStreetMap tiles for the dispatch map. */
+.stt-dark-tiles { filter: invert(1) hue-rotate(180deg) brightness(0.85) contrast(0.9) saturate(0.6); }
+.leaflet-container { background: #121212; font-family: Inter, system-ui, sans-serif; }
+.leaflet-tooltip { background: #1c1c1c; color: #fff; border: 1px solid #3a3a3a; box-shadow: 0 4px 12px rgba(0,0,0,.5); }
+.leaflet-tooltip-top:before { border-top-color: #3a3a3a; }
+.leaflet-control-attribution { background: rgba(10,10,10,.7) !important; color: #8a8a8a; }
+.leaflet-control-attribution a { color: #b4b4b4; }

@@ -6,7 +6,7 @@ import { handle } from "@shared/api/handler.ts";
 import { MemoryStore, type DispatchRow, type MemEvent } from "@shared/api/memoryStore.ts";
 import { DEMO_DRIVERS } from "@shared/domain/fixtures.ts";
 import type { BookingStatusView } from "@shared/api/store.ts";
-import type { Driver } from "@shared/domain/types.ts";
+import type { Driver, TripStage } from "@shared/domain/types.ts";
 
 export type { DispatchRow, MemEvent as TripEvent };
 
@@ -41,7 +41,77 @@ export interface Backend {
   signOut(): Promise<void>;
   /** Authorization header for staff-originated API calls, if signed in. */
   staffAuthHeader(): Promise<Record<string, string>>;
+
+  // --- Phase 2: dispatch operations ------------------------------------------------------------
+  driverBoard(): Promise<BoardRow[]>;
+  assign(bookingId: string, driverId: string, version: number, reason?: string): Promise<void>;
+  offer(bookingId: string, version: number, groupSize: number, driverIds?: string[]): Promise<{ offered: number; expires_at: string }>;
+  release(bookingId: string, version: number, reason: string): Promise<void>;
+  cancel(bookingId: string, version: number, reason: string): Promise<void>;
+  /** Live updates (locations, bookings, assignments, offers). Returns an unsubscribe function. */
+  subscribe(onChange: (table: string) => void): () => void;
+
+  // --- Phase 2: driver app ---------------------------------------------------------------------
+  driverMe(): Promise<DriverMe>;
+  setShift(on: boolean): Promise<void>;
+  reportLocation(p: { lat: number; lng: number; accuracy?: number | null; heading?: number | null; speed?: number | null; at: string }): Promise<void>;
+  driverOffers(): Promise<DriverOffer[]>;
+  respondOffer(offerId: string, accept: boolean): Promise<{ outcome: string }>;
+  driverJobs(): Promise<DriverJob[]>;
+  progress(assignmentId: string, stage: TripStage, version: number): Promise<void>;
+
+  // --- Walkie-talkie -----------------------------------------------------------------------------
+  radioToken(): Promise<{ url: string; token: string; room: string; name: string }>;
 }
+
+export interface BoardRow {
+  driverId: string;
+  fullName: string;
+  onShift: boolean;
+  lat: number | null;
+  lng: number | null;
+  heading: number | null;
+  recordedAt: string | null;
+  vehiclePlate: string | null;
+  vehicleClass: string | null;
+  currentReference: string | null;
+  currentStage: string | null;
+  mapStatus: "off" | "stale" | "free" | "to_pickup" | "onboard";
+}
+
+export interface DriverMe {
+  id: string;
+  fullName: string;
+  onShift: boolean;
+  vehicle: { plate: string; class: string; description: string } | null;
+  earnings: { accruedMinor: number; settledMinor: number; todayMinor: number; currency: string; trips: number };
+  cashToHandInMinor: number;
+}
+
+export interface DriverOffer {
+  id: string; expiresAt: string; earningsMinor: number; currency: string; pickupAt: string;
+  direction: "from_airport" | "to_airport"; airport: string; zone: string | null;
+  passengers: number; largeBags: number; carryOn: number; vehicleClass: string; estDurationMin: number; flight: string | null;
+}
+
+export interface DriverJob {
+  assignmentId: string; version: number; state: string; tripStage: TripStage; holdExpiresAt: string | null;
+  reference: string; bookingState: string; direction: "from_airport" | "to_airport"; airport: string; meetingPoint: string;
+  pickup: { label: string; lat?: number | null; lng?: number | null }; dropoff: { label: string; lat?: number | null; lng?: number | null };
+  zone: string | null; pickupAt: string; proposedPickupAt: string | null; estDurationMin: number;
+  passengers: number; largeBags: number; carryOn: number; vehicleClass: string; flight: string | null; notes: string | null;
+  paymentMode: string; collectionState: string; amountMinor: number | null; currency: string | null; earningsMinor: number | null;
+  passenger: { name: string; phone: string | null; locale: string };
+}
+
+/** Error from a database command: code is the machine code (e.g. stale_version, schedule_conflict). */
+export class CommandError extends Error {
+  constructor(public code: string, message?: string) {
+    super(message ?? code);
+  }
+}
+
+const LIVE_ONLY = () => new CommandError("live_only", "Disponible solo en modo en vivo (con Supabase).");
 
 // --- guest session id (binds quotes to this browser) -------------------------------------------
 export function guestSessionId(): string {
@@ -107,6 +177,46 @@ class DemoBackend implements Backend {
   async staffAuthHeader(): Promise<Record<string, string>> {
     return this.staff ? { authorization: "Bearer demo-dispatcher" } : {};
   }
+
+  // Demo map: drivers drift around Buenos Aires so the panel can be previewed without phones.
+  private sim = new Map<string, { lat: number; lng: number; dLat: number; dLng: number }>();
+  async driverBoard(): Promise<BoardRow[]> {
+    const rows = this.store.dispatchRows();
+    return DEMO_DRIVERS.filter((d) => d.approvalStatus === "approved").map((d, i) => {
+      let p = this.sim.get(d.id);
+      if (!p) {
+        p = { lat: -34.6 + (i - 3) * 0.03, lng: -58.44 + ((i * 37) % 7 - 3) * 0.025, dLat: (i % 2 ? 1 : -1) * 0.0007, dLng: (i % 3 ? 1 : -1) * 0.0009 };
+        this.sim.set(d.id, p);
+      }
+      p.lat += p.dLat; p.lng += p.dLng;
+      if (Math.abs(p.lat + 34.6) > 0.06) p.dLat *= -1;
+      if (Math.abs(p.lng + 58.42) > 0.07) p.dLng *= -1;
+      const job = rows.find((r) => r.driverId === d.id && r.state === "confirmed");
+      const status = i === 4 ? "off" : i === 1 ? "onboard" : i === 0 ? "to_pickup" : "free";
+      return {
+        driverId: d.id, fullName: d.fullName, onShift: status !== "off", lat: status === "off" ? null : p.lat, lng: status === "off" ? null : p.lng,
+        heading: (Math.atan2(p.dLng, p.dLat) * 180 / Math.PI + 360) % 360, recordedAt: status === "off" ? null : new Date().toISOString(),
+        vehiclePlate: this.store.vehicles.find((v) => v.id === d.vehicleId)?.plate ?? null, vehicleClass: this.store.vehicles.find((v) => v.id === d.vehicleId)?.vehicleClass ?? null,
+        currentReference: status === "onboard" || status === "to_pickup" ? job?.reference ?? null : null, currentStage: null, mapStatus: status as BoardRow["mapStatus"],
+      };
+    });
+  }
+  async assign(): Promise<void> { throw LIVE_ONLY(); }
+  async offer(): Promise<{ offered: number; expires_at: string }> { throw LIVE_ONLY(); }
+  async release(): Promise<void> { throw LIVE_ONLY(); }
+  async cancel(): Promise<void> { throw LIVE_ONLY(); }
+  subscribe(onChange: (t: string) => void) {
+    const i = setInterval(() => onChange("driver_locations"), 3000);
+    return () => clearInterval(i);
+  }
+  async driverMe(): Promise<DriverMe> { throw LIVE_ONLY(); }
+  async setShift(): Promise<void> { throw LIVE_ONLY(); }
+  async reportLocation(): Promise<void> { throw LIVE_ONLY(); }
+  async driverOffers(): Promise<DriverOffer[]> { throw LIVE_ONLY(); }
+  async respondOffer(): Promise<{ outcome: string }> { throw LIVE_ONLY(); }
+  async driverJobs(): Promise<DriverJob[]> { throw LIVE_ONLY(); }
+  async progress(): Promise<void> { throw LIVE_ONLY(); }
+  async radioToken(): Promise<{ url: string; token: string; room: string; name: string }> { throw LIVE_ONLY(); }
 }
 
 // --- live (Supabase) ----------------------------------------------------------------------------
@@ -170,6 +280,63 @@ class SupabaseBackend implements Backend {
   async staffAuthHeader(): Promise<Record<string, string>> {
     const { data } = await this.sb.auth.getSession();
     return data.session ? { authorization: `Bearer ${data.session.access_token}` } : {};
+  }
+
+  /** Call a database command; business errors come back as CommandError(code). */
+  private async rpc<T>(fn: string, args: Record<string, unknown> = {}): Promise<T> {
+    const { data, error } = await this.sb.rpc(fn, args);
+    if (error) throw new CommandError(error.code === "P0001" ? error.message : error.code || "db_error", error.hint || error.message);
+    return data as T;
+  }
+  async driverBoard() {
+    const { data, error } = await this.sb.from("dispatch_driver_board").select("*").order("full_name");
+    if (error) throw error;
+    return (data ?? []).map((r) => camelize<BoardRow>(r));
+  }
+  async assign(bookingId: string, driverId: string, version: number, reason?: string) {
+    await this.rpc("dispatch_assign", { p_booking: bookingId, p_driver: driverId, p_expected_version: version, p_reason: reason ?? null });
+  }
+  async offer(bookingId: string, version: number, groupSize: number, driverIds?: string[]) {
+    return this.rpc<{ offered: number; expires_at: string }>("dispatch_offer", {
+      p_booking: bookingId, p_expected_version: version, p_group_size: groupSize, p_driver_ids: driverIds ?? null,
+    });
+  }
+  async release(bookingId: string, version: number, reason: string) {
+    await this.rpc("dispatch_release", { p_booking: bookingId, p_expected_version: version, p_reason: reason });
+  }
+  async cancel(bookingId: string, version: number, reason: string) {
+    await this.rpc("dispatch_cancel", { p_booking: bookingId, p_expected_version: version, p_reason: reason });
+  }
+  subscribe(onChange: (table: string) => void) {
+    const ch = this.sb.channel(`live-${Math.random().toString(36).slice(2)}`);
+    for (const table of ["driver_locations", "bookings", "assignments", "booking_offers"]) {
+      ch.on("postgres_changes" as never, { event: "*", schema: "public", table } as never, () => onChange(table));
+    }
+    ch.subscribe();
+    return () => { this.sb.removeChannel(ch); };
+  }
+  async driverMe() { return this.rpc<DriverMe>("driver_me"); }
+  async setShift(on: boolean) { await this.rpc("driver_set_shift", { p_on: on }); }
+  async reportLocation(p: { lat: number; lng: number; accuracy?: number | null; heading?: number | null; speed?: number | null; at: string }) {
+    await this.rpc("driver_report_location", {
+      p_lat: p.lat, p_lng: p.lng, p_accuracy: p.accuracy ?? null, p_heading: p.heading ?? null, p_speed: p.speed ?? null, p_recorded_at: p.at,
+    });
+  }
+  async driverOffers() { return this.rpc<DriverOffer[]>("driver_offers"); }
+  async respondOffer(offerId: string, accept: boolean) { return this.rpc<{ outcome: string }>("driver_respond_offer", { p_offer: offerId, p_accept: accept }); }
+  async driverJobs() { return this.rpc<DriverJob[]>("driver_jobs"); }
+  async progress(assignmentId: string, stage: TripStage, version: number) {
+    await this.rpc("driver_trip_progress", { p_assignment: assignmentId, p_stage: stage, p_expected_version: version });
+  }
+  async radioToken() {
+    const { data } = await this.sb.auth.getSession();
+    if (!data.session) throw new CommandError("unauthenticated");
+    const res = await fetch(`${this.url}/functions/v1/radio/token`, {
+      method: "POST", headers: { apikey: this.anonKey, authorization: `Bearer ${data.session.access_token}` },
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new CommandError(body?.error?.code ?? "radio_error", body?.error?.message);
+    return body;
   }
 }
 

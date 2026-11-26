@@ -3,22 +3,25 @@ import { Link } from "react-router-dom";
 import { addDaysLocal, localToUtc, utcToLocalDate } from "@shared/domain/time.ts";
 import type { Driver } from "@shared/domain/types.ts";
 import { Badge, Button, Field, Input, Logo, Select } from "../components/ui";
-import { backend, type DispatchRow, type StaffSession, type TripEvent } from "../lib/backend";
+import { backend, CommandError, type BoardRow, type DispatchRow, type StaffSession, type TripEvent } from "../lib/backend";
+import { DriverMap, STATUS_COLOR, STATUS_ES } from "../components/DriverMap";
+import { Radio } from "../components/Radio";
 import { cx, fmtDateTime, fmtLocalDate, fmtTime, formatMoney } from "../lib/format";
 import { useConfig } from "./BookingPage";
 
 // Spanish-first operational screen. Labels are centralised for later locale work.
 const L = {
-  title: "Despacho", bookings: "Reservas", schedule: "Agenda", today: "Hoy", tomorrow: "Mañana",
+  title: "Despacho", bookings: "Reservas", schedule: "Agenda", map: "Mapa", today: "Hoy", tomorrow: "Mañana",
   all: "Todos", airport: "Aeropuerto", state: "Estado", driver: "Chofer", payment: "Pago", search: "Buscar ref., pasajero, vuelo…",
   unassigned: "Sin asignar", none: "No hay reservas para este día con estos filtros.", newBooking: "Nueva reserva",
-  signIn: "Ingresar", signOut: "Salir", alerts: "Alertas", phase2: "Asignar, ofrecer, reasignar y cancelar se habilitan en la fase 2 (operación de choferes).",
+  signIn: "Ingresar", signOut: "Salir", alerts: "Alertas",
   timeline: "Historial", passenger: "Pasajero", trip: "Viaje", pickup: "Búsqueda", vehicle: "Vehículo", flight: "Vuelo",
   notes: "Notas", source: "Canal", ref: "Ref.", pax: "Pax", money: "Importe",
 };
 const STATE_ES: Record<string, string> = {
   requested: "Solicitada", needs_driver: "Sin chofer", held: "Reservada (hold)", confirmed: "Confirmada", closed: "Cerrada", cancelled: "Cancelada",
 };
+const STAGE_ES: Record<string, string> = { scheduled: "programado", en_route: "en camino", at_pickup: "en el punto", onboard: "con pasajero", complete: "finalizado", no_show: "no se presentó" };
 const PAY_ES: Record<string, string> = { prepaid: "Online", pay_on_pickup_cash: "Efectivo", pay_on_pickup_card: "Tarjeta al chofer" };
 const COLLECT_ES: Record<string, string> = { awaiting_payment: "pago pendiente", pending_collection: "a cobrar", collected: "cobrado", waived: "bonificado", not_applicable: "" };
 const VC_ES: Record<string, string> = { sedan_premium: "Sedán", minivan: "Minivan", taxibus: "TaxiBus" };
@@ -71,7 +74,8 @@ export default function DispatchPage() {
 function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: () => void }) {
   const today = utcToLocalDate(new Date());
   const [date, setDate] = useState(addDaysLocal(today, 1));
-  const [tab, setTab] = useState<"schedule" | "bookings">("schedule");
+  const [tab, setTab] = useState<"schedule" | "map" | "bookings">("schedule");
+  const [board, setBoard] = useState<BoardRow[]>([]);
   const [rows, setRows] = useState<DispatchRow[]>([]);
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [airport, setAirport] = useState("");
@@ -90,13 +94,25 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
     setLoading(true); setError(null);
     try {
       const { from, to } = dayBounds(date);
-      const [r, d] = await Promise.all([backend.dispatchRows(from, to), backend.drivers()]);
-      setRows(r); setDrivers(d); setLoadedAt(new Date());
+      const [r, d, bd] = await Promise.all([backend.dispatchRows(from, to), backend.drivers(), backend.driverBoard().catch(() => [] as BoardRow[])]);
+      setRows(r); setDrivers(d); setBoard(bd); setLoadedAt(new Date());
+      setSelected((cur) => (cur ? r.find((x) => x.id === cur.id) ?? cur : cur));
     } catch (e) { setError((e as Error).message); }
     finally { setLoading(false); }
   }, [date]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { const i = setInterval(load, 60_000); return () => clearInterval(i); }, [load]);
+  // Live updates: positions refresh the map; booking/assignment/offer changes reload the day.
+  useEffect(() => {
+    let t: ReturnType<typeof setTimeout> | null = null;
+    const unsub = backend.subscribe((table) => {
+      if (table === "driver_locations") { backend.driverBoard().then(setBoard).catch(() => {}); return; }
+      if (t) clearTimeout(t);
+      t = setTimeout(load, 400);
+    });
+    const poll = setInterval(() => backend.driverBoard().then(setBoard).catch(() => {}), 15_000);
+    return () => { unsub(); clearInterval(poll); if (t) clearTimeout(t); };
+  }, [load]);
 
   const filtered = useMemo(() => rows.filter((r) =>
     (!airport || r.airport === airport) && (!state || r.state === state) && (!pay || r.paymentMode === pay) &&
@@ -131,12 +147,13 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
           <Logo />
           <span className="rounded-md bg-ink-800 px-2 py-0.5 text-xs font-semibold text-ink-300">{L.title}</span>
           <nav className="ml-4 flex gap-1 rounded-lg bg-ink-900 p-1" role="tablist">
-            {(["schedule", "bookings"] as const).map((k) => (
+            {(["schedule", "map", "bookings"] as const).map((k) => (
               <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)}
                 className={cx("rounded-md px-3 py-1.5 text-sm font-medium", tab === k ? "bg-ink-700 text-white" : "text-ink-400 hover:text-white")}>{L[k]}</button>
             ))}
           </nav>
           <div className="ml-auto flex items-center gap-3 text-sm">
+            <Radio compact disabled={backend.mode === "demo"} />
             <Link to="/despacho/nueva"><Button className="py-2">+ {L.newBooking}</Button></Link>
             <span className="hidden text-ink-400 md:inline">{session.label}</span>
             <Button variant="ghost" className="px-2 py-2" onClick={onSignOut}>{L.signOut}</Button>
@@ -184,12 +201,12 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
           </div>
         )}
 
-        {tab === "schedule"
-          ? <Schedule date={date} turnaround={turnaround} rows={filtered} drivers={drivers.filter((d) => d.approvalStatus === "approved" && d.active)} onSelect={setSelected} />
-          : <BookingsGrid rows={filtered} onSelect={setSelected} />}
+        {tab === "schedule" && <Schedule date={date} turnaround={turnaround} rows={filtered} drivers={drivers.filter((d) => d.approvalStatus === "approved" && d.active)} onSelect={setSelected} />}
+        {tab === "map" && <MapPanel board={board} rows={rows} onSelectBooking={setSelected} />}
+        {tab === "bookings" && <BookingsGrid rows={filtered} onSelect={setSelected} />}
       </div>
 
-      {selected && <BookingDrawer row={selected} onClose={() => setSelected(null)} />}
+      {selected && <BookingDrawer row={selected} drivers={drivers} board={board} onChanged={load} onClose={() => setSelected(null)} />}
     </div>
   );
 }
@@ -289,6 +306,52 @@ function Schedule({ date, turnaround, rows, drivers, onSelect }: { date: string;
   );
 }
 
+// ------------------------------------------------------------------------- map
+function MapPanel({ board, rows, onSelectBooking }: { board: BoardRow[]; rows: DispatchRow[]; onSelectBooking: (r: DispatchRow) => void }) {
+  const [sel, setSel] = useState<string | null>(null);
+  const counts = (["free", "to_pickup", "onboard", "stale", "off"] as const).map((k) => [k, board.filter((b) => b.mapStatus === k).length] as const);
+  const order = { to_pickup: 0, onboard: 1, free: 2, stale: 3, off: 4 } as const;
+  const list = [...board].sort((a, b) => order[a.mapStatus] - order[b.mapStatus] || a.fullName.localeCompare(b.fullName));
+  return (
+    <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
+      <div>
+        <DriverMap rows={board} selectedId={sel} onSelect={setSel} height={600} />
+        <div className="mt-2 flex flex-wrap gap-4 text-xs text-ink-300">
+          {counts.map(([k, n]) => (
+            <span key={k} className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full" style={{ background: STATUS_COLOR[k] }} />{STATUS_ES[k]} · {n}</span>
+          ))}
+          <span className="ml-auto text-ink-500">Ubicación cada ~15 s con la app del chofer abierta. Sin señal = sin datos hace más de 2 min.</span>
+        </div>
+      </div>
+      <div className="max-h-[640px] overflow-y-auto rounded-2xl border border-ink-800">
+        {list.map((b) => {
+          const job = b.currentReference ? rows.find((r) => r.reference === b.currentReference) : rows.find((r) => r.driverId === b.driverId && r.state !== "cancelled" && r.state !== "closed");
+          return (
+            <button key={b.driverId} onClick={() => setSel(b.driverId)}
+              className={cx("block w-full border-b border-ink-800 px-4 py-3 text-left hover:bg-ink-900", sel === b.driverId && "bg-ink-900")}>
+              <div className="flex items-center gap-2">
+                <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: STATUS_COLOR[b.mapStatus] }} />
+                <span className="flex-1 truncate font-medium">{b.fullName}</span>
+                <span className="text-[11px] text-ink-400">{STATUS_ES[b.mapStatus]}</span>
+              </div>
+              <div className="mt-0.5 pl-4 text-xs text-ink-400">
+                {b.vehiclePlate ?? "sin vehículo"}{b.recordedAt ? ` · visto ${fmtTime(b.recordedAt)}` : ""}
+              </div>
+              {job && (
+                <span role="link" tabIndex={0} onClick={(e) => { e.stopPropagation(); onSelectBooking(job); }}
+                  className="mt-1 ml-4 inline-block rounded bg-ink-800 px-2 py-0.5 font-mono text-[11px] text-cab-400 hover:bg-ink-700">
+                  {job.reference} · {fmtTime(job.agreedPickupAt)}
+                </span>
+              )}
+            </button>
+          );
+        })}
+        {!list.length && <p className="p-6 text-sm text-ink-400">Sin choferes.</p>}
+      </div>
+    </div>
+  );
+}
+
 // ------------------------------------------------------------------------- grid
 function BookingsGrid({ rows, onSelect }: { rows: DispatchRow[]; onSelect: (r: DispatchRow) => void }) {
   if (!rows.length) return <p className="rounded-2xl border border-ink-800 p-10 text-center text-ink-400">{L.none}</p>;
@@ -328,9 +391,78 @@ function BookingsGrid({ rows, onSelect }: { rows: DispatchRow[]; onSelect: (r: D
 }
 
 // ------------------------------------------------------------------------- detail drawer
-function BookingDrawer({ row: r, onClose }: { row: DispatchRow; onClose: () => void }) {
+const ERR_ES: Record<string, string> = {
+  stale_version: "La reserva cambió mientras la mirabas. Se actualizó; revisá y probá de nuevo.",
+  schedule_conflict: "Ese chofer o vehículo ya tiene un viaje que se superpone.",
+  already_assigned: "La reserva ya tiene chofer.", vehicle_too_small: "El vehículo no alcanza para pasajeros o equipaje.",
+  outside_working_hours: "El chofer no trabaja a esa hora (turno o indisponibilidad).", no_vehicle_allocated: "El chofer no tiene vehículo asignado para ese horario.",
+  vehicle_not_allocated_to_driver: "Ese vehículo no está asignado al chofer.", driver_not_approved: "Chofer no aprobado o inactivo.",
+  no_eligible_drivers: "No hay choferes libres y habilitados para este viaje.", booking_not_open: "Solo se ofrecen reservas sin chofer.",
+  reason_required: "Indicá un motivo.", booking_closed: "La reserva ya está cerrada o cancelada.", no_active_driver: "La reserva no tiene chofer activo.",
+  forbidden: "Tu usuario no tiene permiso de despacho.", live_only: "Disponible solo en modo en vivo (con Supabase).",
+};
+const errText = (e: unknown) => (e instanceof CommandError ? ERR_ES[e.code] ?? e.message : (e as Error).message);
+
+function BookingActions({ r, drivers, board, onChanged }: { r: DispatchRow; drivers: Driver[]; board: BoardRow[]; onChanged: () => void }) {
+  const [driverId, setDriverId] = useState("");
+  const [group, setGroup] = useState(3);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const open = r.state === "needs_driver";
+  const covered = r.state === "held" || r.state === "confirmed";
+  const ended = r.state === "cancelled" || r.state === "closed";
+  const approved = drivers.filter((d) => d.approvalStatus === "approved" && d.active);
+  const status = (id: string) => board.find((b) => b.driverId === id);
+
+  async function run(fn: () => Promise<unknown>, ok: string) {
+    setBusy(true); setMsg(null);
+    try { await fn(); setMsg({ ok: true, text: ok }); setReason(""); onChanged(); }
+    catch (e) { setMsg({ ok: false, text: errText(e) }); if (e instanceof CommandError && e.code === "stale_version") onChanged(); }
+    finally { setBusy(false); }
+  }
+
+  if (ended) return null;
+  return (
+    <div className="mt-5 space-y-3 rounded-xl border border-ink-700 bg-ink-800/40 p-3">
+      <div className="text-xs font-semibold uppercase tracking-wide text-ink-400">Acciones</div>
+      <div className="flex gap-2">
+        <div className="flex-1">
+          <Select value={driverId} onChange={(e) => setDriverId(e.target.value)} className="py-2" aria-label="Chofer">
+            <option value="">{covered ? "Reasignar a…" : "Asignar a…"}</option>
+            {approved.filter((d) => d.id !== r.driverId).map((d) => {
+              const b = status(d.id);
+              return <option key={d.id} value={d.id}>{d.fullName}{b ? ` · ${STATUS_ES[b.mapStatus]}` : ""}</option>;
+            })}
+          </Select>
+        </div>
+        <Button className="py-2" disabled={!driverId || busy || (covered && !reason.trim())}
+          onClick={() => run(() => backend.assign(r.id, driverId, r.version, covered ? reason : undefined), covered ? "Chofer reasignado." : "Chofer asignado.")}>
+          {covered ? "Reasignar" : "Asignar"}
+        </Button>
+      </div>
+      {open && (
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-ink-300">Ofrecer a los</span>
+          <div className="w-20"><Input type="number" min={1} max={10} value={group} onChange={(e) => setGroup(Math.max(1, Math.min(10, Number(e.target.value) || 1)))} className="py-2" aria-label="Cantidad" /></div>
+          <span className="flex-1 text-sm text-ink-300">más cercanos</span>
+          <Button variant="outline" className="py-2" disabled={busy}
+            onClick={() => run(async () => { const o = await backend.offer(r.id, r.version, group); setMsg({ ok: true, text: `Oferta enviada a ${o.offered}` }); }, "Oferta enviada.")}>Ofrecer</Button>
+        </div>
+      )}
+      <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder={covered ? "Motivo (obligatorio para reasignar, liberar o cancelar)" : "Motivo (para cancelar)"} className="py-2" aria-label="Motivo" />
+      <div className="flex gap-2">
+        {covered && <Button variant="outline" className="flex-1 py-2" disabled={busy || !reason.trim()} onClick={() => run(() => backend.release(r.id, r.version, reason), "Chofer liberado; la reserva vuelve a la cola.")}>Liberar chofer</Button>}
+        <Button variant="outline" className="flex-1 border-red-500/40 py-2 text-red-300" disabled={busy || !reason.trim()} onClick={() => run(() => backend.cancel(r.id, r.version, reason), "Reserva cancelada.")}>Cancelar reserva</Button>
+      </div>
+      {msg && <p role="status" className={cx("text-sm", msg.ok ? "text-emerald-300" : "text-red-300")}>{msg.text}</p>}
+    </div>
+  );
+}
+
+function BookingDrawer({ row: r, drivers, board, onChanged, onClose }: { row: DispatchRow; drivers: Driver[]; board: BoardRow[]; onChanged: () => void; onClose: () => void }) {
   const [events, setEvents] = useState<TripEvent[]>([]);
-  useEffect(() => { backend.tripEvents(r.id).then(setEvents).catch(() => setEvents([])); }, [r.id]);
+  useEffect(() => { backend.tripEvents(r.id).then(setEvents).catch(() => setEvents([])); }, [r.id, r.version, r.state]);
   useEffect(() => {
     const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", k);
@@ -362,7 +494,7 @@ function BookingDrawer({ row: r, onClose }: { row: DispatchRow; onClose: () => v
           {r.notes && <div className={item}><dt className="text-ink-400">{L.notes}</dt><dd>{r.notes}</dd></div>}
         </dl>
 
-        <p className="mt-5 rounded-xl border border-ink-700 bg-ink-800/60 p-3 text-xs text-ink-300">{L.phase2}</p>
+        <BookingActions r={r} drivers={drivers} board={board} onChanged={onChanged} />
 
         <h3 className="mb-2 mt-6 text-xs font-semibold uppercase tracking-wide text-ink-400">{L.timeline}</h3>
         <ol className="relative ml-2 border-l border-ink-700">
@@ -370,7 +502,12 @@ function BookingDrawer({ row: r, onClose }: { row: DispatchRow; onClose: () => v
             <li key={i} className="mb-4 ml-4">
               <span className="absolute -left-1.5 mt-1 h-3 w-3 rounded-full border-2 border-ink-900 bg-cab-500" />
               <div className="text-xs text-ink-400">{fmtDateTime(e.at)} · {e.actor}</div>
-              <div className="text-sm">{e.kind === "booking.created" ? "Reserva creada" : `${STATE_ES[e.fromValue ?? ""] ?? e.fromValue} → ${STATE_ES[e.toValue ?? ""] ?? e.toValue}`}
+              <div className="text-sm">{e.kind === "booking.created" ? "Reserva creada"
+                : e.kind === "booking.offered" ? `Ofrecida a ${String(e.payload?.drivers ?? "")} chofer(es)`
+                : e.kind === "offer.declined" ? "Oferta rechazada"
+                : e.kind === "assignment.released" ? "Chofer liberado"
+                : e.kind === "trip.stage_changed" ? `Viaje: ${STAGE_ES[e.toValue ?? ""] ?? e.toValue}`
+                : `${STATE_ES[e.fromValue ?? ""] ?? e.fromValue} → ${STATE_ES[e.toValue ?? ""] ?? e.toValue}`}
                 {typeof e.payload?.driver === "string" && <span className="text-ink-300"> · {e.payload.driver}</span>}
                 {typeof e.payload?.reason === "string" && <span className="text-ink-300"> · {e.payload.reason}</span>}</div>
             </li>
