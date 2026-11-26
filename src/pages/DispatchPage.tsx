@@ -1,0 +1,382 @@
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { Link } from "react-router-dom";
+import { addDaysLocal, localToUtc, utcToLocalDate } from "@shared/domain/time.ts";
+import type { Driver } from "@shared/domain/types.ts";
+import { Badge, Button, Field, Input, Logo, Select } from "../components/ui";
+import { backend, type DispatchRow, type StaffSession, type TripEvent } from "../lib/backend";
+import { cx, fmtDateTime, fmtLocalDate, fmtTime, formatMoney } from "../lib/format";
+import { useConfig } from "./BookingPage";
+
+// Spanish-first operational screen. Labels are centralised for later locale work.
+const L = {
+  title: "Despacho", bookings: "Reservas", schedule: "Agenda", today: "Hoy", tomorrow: "Mañana",
+  all: "Todos", airport: "Aeropuerto", state: "Estado", driver: "Chofer", payment: "Pago", search: "Buscar ref., pasajero, vuelo…",
+  unassigned: "Sin asignar", none: "No hay reservas para este día con estos filtros.", newBooking: "Nueva reserva",
+  signIn: "Ingresar", signOut: "Salir", alerts: "Alertas", phase2: "Asignar, ofrecer, reasignar y cancelar se habilitan en la fase 2 (operación de choferes).",
+  timeline: "Historial", passenger: "Pasajero", trip: "Viaje", pickup: "Búsqueda", vehicle: "Vehículo", flight: "Vuelo",
+  notes: "Notas", source: "Canal", ref: "Ref.", pax: "Pax", money: "Importe",
+};
+const STATE_ES: Record<string, string> = {
+  requested: "Solicitada", needs_driver: "Sin chofer", held: "Reservada (hold)", confirmed: "Confirmada", closed: "Cerrada", cancelled: "Cancelada",
+};
+const PAY_ES: Record<string, string> = { prepaid: "Online", pay_on_pickup_cash: "Efectivo", pay_on_pickup_card: "Tarjeta al chofer" };
+const COLLECT_ES: Record<string, string> = { awaiting_payment: "pago pendiente", pending_collection: "a cobrar", collected: "cobrado", waived: "bonificado", not_applicable: "" };
+const VC_ES: Record<string, string> = { sedan_premium: "Sedán", minivan: "Minivan", taxibus: "TaxiBus" };
+const SOURCE_ES: Record<string, string> = { web: "Web", whatsapp: "WhatsApp", staff: "Despacho", phone: "Teléfono", voice: "Voz" };
+
+function StaffLogin({ onDone }: { onDone: (s: StaffSession) => void }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setErr(null);
+    try { onDone(await backend.signIn(email, password)); } catch (x) { setErr((x as Error).message); }
+  }
+  return (
+    <div className="mx-auto max-w-sm px-5 py-24">
+      <div className="rounded-3xl border border-ink-700 bg-ink-900 p-7">
+        <Logo />
+        <h1 className="mt-6 text-xl font-semibold">{L.title}</h1>
+        {backend.mode === "demo" ? (
+          <>
+            <p className="mt-2 text-sm text-ink-300">Modo demo: entrás como despachante de prueba.</p>
+            <Button className="mt-6 w-full" onClick={async () => onDone(await backend.signInDemo())} data-testid="demo-signin">Entrar como despacho (demo)</Button>
+          </>
+        ) : (
+          <form onSubmit={submit} className="mt-5 grid gap-4">
+            <Field label="Email"><Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" /></Field>
+            <Field label="Contraseña"><Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" /></Field>
+            {err && <p role="alert" className="text-sm text-red-400">{err}</p>}
+            <Button type="submit">{L.signIn}</Button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function dayBounds(date: string) {
+  return { from: localToUtc(date, "00:00").toISOString(), to: localToUtc(addDaysLocal(date, 1), "00:00").toISOString() };
+}
+
+export default function DispatchPage() {
+  const [session, setSession] = useState<StaffSession | null | undefined>(undefined);
+  useEffect(() => { backend.staffSession().then(setSession); }, []);
+  if (session === undefined) return null;
+  if (!session) return <StaffLogin onDone={setSession} />;
+  return <Dispatch session={session} onSignOut={async () => { await backend.signOut(); setSession(null); }} />;
+}
+
+function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: () => void }) {
+  const today = utcToLocalDate(new Date());
+  const [date, setDate] = useState(addDaysLocal(today, 1));
+  const [tab, setTab] = useState<"schedule" | "bookings">("schedule");
+  const [rows, setRows] = useState<DispatchRow[]>([]);
+  const [drivers, setDrivers] = useState<Driver[]>([]);
+  const [airport, setAirport] = useState("");
+  const [state, setState] = useState("");
+  const [driverId, setDriverId] = useState("");
+  const [pay, setPay] = useState("");
+  const [q, setQ] = useState("");
+  const [selected, setSelected] = useState<DispatchRow | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadedAt, setLoadedAt] = useState<Date | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const cfg = useConfig();
+  const turnaround = cfg?.policy.turnaroundMinutes ?? 20;
+
+  const load = useCallback(async () => {
+    setLoading(true); setError(null);
+    try {
+      const { from, to } = dayBounds(date);
+      const [r, d] = await Promise.all([backend.dispatchRows(from, to), backend.drivers()]);
+      setRows(r); setDrivers(d); setLoadedAt(new Date());
+    } catch (e) { setError((e as Error).message); }
+    finally { setLoading(false); }
+  }, [date]);
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => { const i = setInterval(load, 60_000); return () => clearInterval(i); }, [load]);
+
+  const filtered = useMemo(() => rows.filter((r) =>
+    (!airport || r.airport === airport) && (!state || r.state === state) && (!pay || r.paymentMode === pay) &&
+    (!driverId || (driverId === "none" ? !r.driverId : r.driverId === driverId)) &&
+    (!q || `${r.reference} ${r.passengerName} ${r.flightDesignator ?? ""} ${r.pickupPlace.label} ${r.dropoffPlace.label}`.toLowerCase().includes(q.toLowerCase()))
+  ), [rows, airport, state, pay, driverId, q]);
+
+  const alerts = useMemo(() => {
+    const now = Date.now();
+    const H = (cfg?.policy.escalation.unassigned_alert_hours_before ?? 12) * 3600_000;
+    const out: { tone: string; text: string; row: DispatchRow }[] = [];
+    for (const r of rows) {
+      const t = new Date(r.agreedPickupAt).getTime();
+      if (r.state === "needs_driver" && t - now < H && t > now) out.push({ tone: "needs_driver", text: `${r.reference} sin chofer · búsqueda ${fmtTime(r.agreedPickupAt)}`, row: r });
+      if (r.state === "held" && r.holdExpiresAt) out.push({ tone: "held", text: `${r.reference} hold vence ${fmtTime(r.holdExpiresAt)}`, row: r });
+      if (r.flightExceptionReason) out.push({ tone: "warn", text: `${r.reference} sin vuelo: ${r.flightExceptionReason}`, row: r });
+    }
+    return out;
+  }, [rows, cfg]);
+
+  const counts = useMemo(() => ({
+    total: rows.filter((r) => r.state !== "cancelled").length,
+    needs: rows.filter((r) => r.state === "needs_driver").length,
+    held: rows.filter((r) => r.state === "held").length,
+    confirmed: rows.filter((r) => r.state === "confirmed").length,
+  }), [rows]);
+
+  return (
+    <div className="min-h-screen">
+      <header className="border-b border-ink-800 bg-ink-950/90 backdrop-blur">
+        <div className="flex flex-wrap items-center gap-4 px-5 py-3">
+          <Logo />
+          <span className="rounded-md bg-ink-800 px-2 py-0.5 text-xs font-semibold text-ink-300">{L.title}</span>
+          <nav className="ml-4 flex gap-1 rounded-lg bg-ink-900 p-1" role="tablist">
+            {(["schedule", "bookings"] as const).map((k) => (
+              <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)}
+                className={cx("rounded-md px-3 py-1.5 text-sm font-medium", tab === k ? "bg-ink-700 text-white" : "text-ink-400 hover:text-white")}>{L[k]}</button>
+            ))}
+          </nav>
+          <div className="ml-auto flex items-center gap-3 text-sm">
+            <Link to="/despacho/nueva"><Button className="py-2">+ {L.newBooking}</Button></Link>
+            <span className="hidden text-ink-400 md:inline">{session.label}</span>
+            <Button variant="ghost" className="px-2 py-2" onClick={onSignOut}>{L.signOut}</Button>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-end gap-3 border-t border-ink-800 px-5 py-3">
+          <div className="flex items-center gap-1">
+            <Button variant="outline" className="px-3 py-2" aria-label="Día anterior" onClick={() => setDate(addDaysLocal(date, -1))}>‹</Button>
+            <div className="w-44"><Input type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} className="py-2" aria-label="Fecha" /></div>
+            <Button variant="outline" className="px-3 py-2" aria-label="Día siguiente" onClick={() => setDate(addDaysLocal(date, 1))}>›</Button>
+            <Button variant={date === today ? "primary" : "ghost"} className="px-3 py-2" onClick={() => setDate(today)}>{L.today}</Button>
+            <Button variant={date === addDaysLocal(today, 1) ? "primary" : "ghost"} className="px-3 py-2" onClick={() => setDate(addDaysLocal(today, 1))}>{L.tomorrow}</Button>
+          </div>
+          <FilterSelect label={L.airport} value={airport} onChange={setAirport} options={[["EZE", "EZE"], ["AEP", "AEP"]]} />
+          <FilterSelect label={L.state} value={state} onChange={setState} options={Object.entries(STATE_ES)} />
+          <FilterSelect label={L.driver} value={driverId} onChange={setDriverId} options={[["none", L.unassigned], ...drivers.map((d) => [d.id, d.fullName] as [string, string])]} />
+          <FilterSelect label={L.payment} value={pay} onChange={setPay} options={Object.entries(PAY_ES)} />
+          <div className="w-64"><Input value={q} onChange={(e) => setQ(e.target.value)} placeholder={L.search} className="py-2" aria-label="Buscar" /></div>
+          <span className="ml-auto text-xs text-ink-400">
+            {loading ? "Actualizando…" : loadedAt ? `Actualizado ${fmtTime(loadedAt.toISOString())}` : ""}
+          </span>
+        </div>
+      </header>
+
+      <div className="px-5 py-5">
+        <div className="mb-4 flex flex-wrap items-center gap-x-6 gap-y-2">
+          <h1 className="text-lg font-semibold first-letter:uppercase">{fmtLocalDate(date)}</h1>
+          <Stat n={counts.total} label="viajes" />
+          <Stat n={counts.needs} label="sin chofer" tone="text-amber-300" />
+          <Stat n={counts.held} label="en hold" tone="text-sky-300" />
+          <Stat n={counts.confirmed} label="confirmados" tone="text-emerald-300" />
+        </div>
+
+        {error && <p role="alert" className="mb-4 rounded-xl bg-red-500/10 px-4 py-3 text-sm text-red-300">No se pudieron cargar las reservas: {error}</p>}
+
+        {alerts.length > 0 && (
+          <div className="mb-5 rounded-2xl border border-amber-500/25 bg-amber-500/5 p-3">
+            <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-amber-300">{L.alerts} · {alerts.length}</div>
+            <div className="flex flex-wrap gap-2">
+              {alerts.map((a, i) => (
+                <button key={i} onClick={() => setSelected(a.row)} className="text-left"><Badge tone={a.tone}>{a.text}</Badge></button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {tab === "schedule"
+          ? <Schedule date={date} turnaround={turnaround} rows={filtered} drivers={drivers.filter((d) => d.approvalStatus === "approved" && d.active)} onSelect={setSelected} />
+          : <BookingsGrid rows={filtered} onSelect={setSelected} />}
+      </div>
+
+      {selected && <BookingDrawer row={selected} onClose={() => setSelected(null)} />}
+    </div>
+  );
+}
+
+function Stat({ n, label, tone = "text-white" }: { n: number; label: string; tone?: string }) {
+  return <span className="text-sm text-ink-400"><span className={cx("mr-1 text-lg font-semibold tabular-nums", tone)}>{n}</span>{label}</span>;
+}
+
+function FilterSelect({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: [string, string][] }) {
+  return (
+    <div className="w-48">
+      <Select value={value} onChange={(e) => onChange(e.target.value)} aria-label={label} className="py-2 pr-9">
+        <option value="">{label}: {L.all}</option>
+        {options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+      </Select>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------------- schedule (timeline)
+const HOUR_PX = 64;
+
+function Schedule({ date, turnaround, rows, drivers, onSelect }: { date: string; turnaround: number; rows: DispatchRow[]; drivers: Driver[]; onSelect: (r: DispatchRow) => void }) {
+  const dayStart = localToUtc(date, "00:00").getTime();
+  const active = rows.filter((r) => r.state !== "cancelled");
+  const unassigned = active.filter((r) => !r.driverId);
+  const lanes = useMemo(() => {
+    // Greedy lane packing so overlapping unassigned jobs stay readable.
+    const sorted = [...unassigned].sort((a, b) => a.agreedPickupAt.localeCompare(b.agreedPickupAt));
+    const ends: number[] = [];
+    return sorted.map((r) => {
+      const s = new Date(r.agreedPickupAt).getTime();
+      let lane = ends.findIndex((e) => e <= s);
+      if (lane < 0) { lane = ends.length; ends.push(0); }
+      ends[lane] = s + (r.estDurationMin + turnaround) * 60_000;
+      return { r, lane };
+    });
+  }, [unassigned, turnaround]);
+  const laneCount = Math.max(1, ...lanes.map((l) => l.lane + 1));
+  const now = Date.now();
+  const nowX = now >= dayStart && now < dayStart + 86_400_000 ? ((now - dayStart) / 3_600_000) * HOUR_PX : null;
+
+  const block = (r: DispatchRow, top: number) => {
+    const s = (new Date(r.agreedPickupAt).getTime() - dayStart) / 3_600_000;
+    const w = Math.max(((r.estDurationMin + turnaround) / 60) * HOUR_PX, 96);
+    const dirIcon = r.direction === "from_airport" ? `${r.airport} →` : `→ ${r.airport}`;
+    return (
+      <button key={r.id} onClick={() => onSelect(r)} data-testid={`block-${r.reference}`}
+        style={{ left: s * HOUR_PX, width: w, top }}
+        className={cx("absolute h-[52px] overflow-hidden rounded-lg border px-2 py-1 text-left text-[11px] leading-tight shadow transition hover:z-10 hover:brightness-125",
+          r.state === "needs_driver" && "border-amber-500/50 bg-amber-500/15",
+          r.state === "held" && "border-dashed border-sky-400/60 bg-sky-500/15",
+          r.state === "confirmed" && "border-emerald-500/40 bg-emerald-500/15")}>
+        <div className="flex items-center gap-1 font-semibold text-white"><span className="tabular-nums">{fmtTime(r.agreedPickupAt)}</span><span className="text-ink-300">{dirIcon}</span></div>
+        <div className="truncate text-ink-300">{r.zoneName} · {VC_ES[r.vehicleClass]} · {r.passengers}p</div>
+        <div className="truncate font-mono text-ink-400">{r.reference}{r.flightDesignator ? ` · ${r.flightDesignator}` : ""}</div>
+      </button>
+    );
+  };
+
+  const Row = ({ label, sub, height, children }: { label: string; sub?: string; height: number; children: React.ReactNode }) => (
+    <div className="flex border-b border-ink-800">
+      <div className="sticky left-0 z-20 w-48 shrink-0 border-r border-ink-800 bg-ink-950 px-3 py-2" style={{ height }}>
+        <div className="truncate text-sm font-medium">{label}</div>
+        {sub && <div className="truncate text-xs text-ink-400">{sub}</div>}
+      </div>
+      <div className="relative" style={{ width: 24 * HOUR_PX, height }}>
+        {Array.from({ length: 24 }, (_, h) => <div key={h} className={cx("absolute top-0 h-full border-l", h % 6 === 0 ? "border-ink-700" : "border-ink-800/70")} style={{ left: h * HOUR_PX }} />)}
+        {nowX !== null && <div className="absolute top-0 z-10 h-full w-px bg-cab-500" style={{ left: nowX }} />}
+        {children}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="overflow-x-auto rounded-2xl border border-ink-800 bg-ink-950" data-testid="schedule">
+      <div className="min-w-max">
+        <div className="flex border-b border-ink-800 bg-ink-900">
+          <div className="sticky left-0 z-20 w-48 shrink-0 border-r border-ink-800 bg-ink-900 px-3 py-2 text-xs text-ink-400">Chofer / vehículo</div>
+          <div className="relative h-8" style={{ width: 24 * HOUR_PX }}>
+            {Array.from({ length: 24 }, (_, h) => <span key={h} className={cx("absolute top-2 text-[10px] tabular-nums text-ink-400", h > 0 && "-translate-x-1/2")} style={{ left: h === 0 ? 4 : h * HOUR_PX }}>{String(h).padStart(2, "0")}:00</span>)}
+          </div>
+        </div>
+        <Row label={L.unassigned} sub={`${unassigned.length} viaje(s)`} height={laneCount * 60 + 8}>
+          {lanes.map(({ r, lane }) => block(r, 4 + lane * 60))}
+        </Row>
+        {drivers.map((d) => {
+          const mine = active.filter((r) => r.driverId === d.id);
+          return (
+            <Row key={d.id} label={d.fullName} sub={mine[0]?.vehiclePlate ?? undefined} height={60}>
+              {mine.map((r) => block(r, 4))}
+            </Row>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------------- grid
+function BookingsGrid({ rows, onSelect }: { rows: DispatchRow[]; onSelect: (r: DispatchRow) => void }) {
+  if (!rows.length) return <p className="rounded-2xl border border-ink-800 p-10 text-center text-ink-400">{L.none}</p>;
+  const th = "px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-ink-400";
+  return (
+    <div className="overflow-x-auto rounded-2xl border border-ink-800">
+      <table className="w-full min-w-[1000px] text-sm" data-testid="bookings-grid">
+        <thead className="bg-ink-900"><tr>
+          <th className={th}>{L.pickup}</th><th className={th}>{L.ref}</th><th className={th}>{L.state}</th><th className={th}>{L.trip}</th>
+          <th className={th}>{L.flight}</th><th className={th}>{L.vehicle}</th><th className={th}>{L.passenger}</th><th className={th}>{L.driver}</th><th className={cx(th, "text-right")}>{L.money}</th>
+        </tr></thead>
+        <tbody className="divide-y divide-ink-800">
+          {rows.map((r) => (
+            <tr key={r.id} onClick={() => onSelect(r)} className={cx("cursor-pointer hover:bg-ink-900", r.state === "cancelled" && "opacity-50")}>
+              <td className="px-3 py-2.5 font-semibold tabular-nums">{fmtTime(r.agreedPickupAt)}</td>
+              <td className="px-3 py-2.5 font-mono text-xs">{r.reference}</td>
+              <td className="px-3 py-2.5"><Badge tone={r.state}>{STATE_ES[r.state]}</Badge></td>
+              <td className="px-3 py-2.5">
+                <span className="font-mono text-xs text-ink-300">{r.direction === "from_airport" ? `${r.airport} → ` : ""}</span>
+                {r.zoneName}
+                <span className="font-mono text-xs text-ink-300">{r.direction === "to_airport" ? ` → ${r.airport}` : ""}</span>
+              </td>
+              <td className="px-3 py-2.5 font-mono text-xs">{r.flightDesignator ?? (r.flightExceptionReason ? <Badge tone="warn">excepción</Badge> : "—")}</td>
+              <td className="px-3 py-2.5">{VC_ES[r.vehicleClass]} <span className="text-xs text-ink-400">· {r.passengers}p {r.largeBags}v {r.carryOn}m</span></td>
+              <td className="px-3 py-2.5">{r.passengerName}</td>
+              <td className="px-3 py-2.5">{r.driverName ?? <span className="text-ink-500">—</span>}</td>
+              <td className="px-3 py-2.5 text-right tabular-nums">
+                {r.amountMinor !== null ? formatMoney(r.amountMinor, r.currency!, "es-AR") : "—"}
+                <div className="text-[11px] text-ink-400">{PAY_ES[r.paymentMode]} {COLLECT_ES[r.collectionState] && `· ${COLLECT_ES[r.collectionState]}`}</div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------------- detail drawer
+function BookingDrawer({ row: r, onClose }: { row: DispatchRow; onClose: () => void }) {
+  const [events, setEvents] = useState<TripEvent[]>([]);
+  useEffect(() => { backend.tripEvents(r.id).then(setEvents).catch(() => setEvents([])); }, [r.id]);
+  useEffect(() => {
+    const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", k);
+    return () => window.removeEventListener("keydown", k);
+  }, [onClose]);
+  const mapsUrl = (label: string) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(label + ", Buenos Aires")}`;
+  const item = "grid grid-cols-[110px_1fr] gap-3 py-2";
+  return (
+    <div className="fixed inset-0 z-40 flex justify-end bg-black/50" onClick={onClose} role="dialog" aria-modal="true" aria-label={`Reserva ${r.reference}`}>
+      <aside className="h-full w-full max-w-md overflow-y-auto border-l border-ink-700 bg-ink-900 p-6" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between">
+          <div>
+            <div className="font-mono text-xl font-bold text-cab-400">{r.reference}</div>
+            <div className="mt-1 flex gap-2"><Badge tone={r.state}>{STATE_ES[r.state]}</Badge><Badge>{SOURCE_ES[r.source]}</Badge>{r.locale === "en" && <Badge>EN</Badge>}</div>
+          </div>
+          <button onClick={onClose} className="text-2xl text-ink-400 hover:text-white" aria-label="Cerrar">×</button>
+        </div>
+
+        <dl className="mt-5 divide-y divide-ink-800 text-sm">
+          <div className={item}><dt className="text-ink-400">{L.pickup}</dt><dd className="font-semibold">{fmtDateTime(r.agreedPickupAt)}{r.proposedPickupAt && <span className="ml-2 text-amber-300">→ {fmtTime(r.proposedPickupAt)}?</span>}</dd></div>
+          <div className={item}><dt className="text-ink-400">Desde</dt><dd>{r.pickupPlace.label} <a className="ml-1 text-xs text-cab-400" href={mapsUrl(r.pickupPlace.label)} target="_blank" rel="noreferrer">mapa</a>
+            {r.pickupPlace.originalText && r.pickupPlace.originalText !== r.pickupPlace.label && <div className="text-xs text-ink-400">Texto original: “{r.pickupPlace.originalText}”</div>}</dd></div>
+          <div className={item}><dt className="text-ink-400">Hasta</dt><dd>{r.dropoffPlace.label} <a className="ml-1 text-xs text-cab-400" href={mapsUrl(r.dropoffPlace.label)} target="_blank" rel="noreferrer">mapa</a></dd></div>
+          <div className={item}><dt className="text-ink-400">{L.flight}</dt><dd className="font-mono">{r.flightDesignator ? `${r.flightDesignator} · llegada ${r.flightLocalArrivalDate}` : r.flightExceptionReason ? `Excepción: ${r.flightExceptionReason}` : "—"}</dd></div>
+          <div className={item}><dt className="text-ink-400">{L.vehicle}</dt><dd>{VC_ES[r.vehicleClass]} · {r.passengers} pax · {r.largeBags} valijas · {r.carryOn} mano</dd></div>
+          <div className={item}><dt className="text-ink-400">{L.passenger}</dt><dd>{r.passengerName}<div className="text-xs text-ink-300">{[r.passengerPhone, r.passengerEmail].filter(Boolean).join(" · ")}</div></dd></div>
+          <div className={item}><dt className="text-ink-400">{L.money}</dt><dd>{r.amountMinor !== null ? formatMoney(r.amountMinor, r.currency!, "es-AR") : "—"} · {PAY_ES[r.paymentMode]} ({COLLECT_ES[r.collectionState] || "—"})</dd></div>
+          <div className={item}><dt className="text-ink-400">{L.driver}</dt><dd>{r.driverName ? `${r.driverName} · ${r.vehiclePlate}` : "Sin asignar"}{r.holdExpiresAt && <div className="text-xs text-sky-300">Hold hasta {fmtTime(r.holdExpiresAt)}</div>}</dd></div>
+          {r.notes && <div className={item}><dt className="text-ink-400">{L.notes}</dt><dd>{r.notes}</dd></div>}
+        </dl>
+
+        <p className="mt-5 rounded-xl border border-ink-700 bg-ink-800/60 p-3 text-xs text-ink-300">{L.phase2}</p>
+
+        <h3 className="mb-2 mt-6 text-xs font-semibold uppercase tracking-wide text-ink-400">{L.timeline}</h3>
+        <ol className="relative ml-2 border-l border-ink-700">
+          {events.map((e, i) => (
+            <li key={i} className="mb-4 ml-4">
+              <span className="absolute -left-1.5 mt-1 h-3 w-3 rounded-full border-2 border-ink-900 bg-cab-500" />
+              <div className="text-xs text-ink-400">{fmtDateTime(e.at)} · {e.actor}</div>
+              <div className="text-sm">{e.kind === "booking.created" ? "Reserva creada" : `${STATE_ES[e.fromValue ?? ""] ?? e.fromValue} → ${STATE_ES[e.toValue ?? ""] ?? e.toValue}`}
+                {typeof e.payload?.driver === "string" && <span className="text-ink-300"> · {e.payload.driver}</span>}
+                {typeof e.payload?.reason === "string" && <span className="text-ink-300"> · {e.payload.reason}</span>}</div>
+            </li>
+          ))}
+        </ol>
+      </aside>
+    </div>
+  );
+}

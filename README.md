@@ -1,0 +1,107 @@
+# SoyTuTaxi airport transfers: Phase 1 (Foundation)
+
+This release is the dispatch backend and web front end for Buenos Aires transfers between city zones and Ezeiza (EZE) or Aeroparque (AEP), built from the *SoyTuTaxi airport transfer system* brief dated 26 Nov 2026. It covers **build-order step 1** from that brief: migrations, auth roles, fixture routes and vehicles, the fare engine, the booking form and the dispatch schedule.
+
+> **DEMO MODE.** With no Supabase credentials set, the app runs entirely in the browser against an in-memory store. A striped banner marks demo mode. All fares and policies are labelled demo values. Nothing is charged and no messages are sent.
+
+## What's in this release
+
+| Area | Delivered |
+|---|---|
+| Database | Full foundation schema across 20 tables, with enums, FKs, range/amount checks and `btree_gist` exclusion constraints on driver and vehicle occupancy. Ranges are half-open. There is one active assignment per booking, and fare rules cannot be ambiguous. RLS is on and forced for every table. |
+| Roles | `admin`, `dispatcher`, `finance` and `driver` via `memberships`. Staff read through RLS and only admins edit configuration. Drivers see only their own row and assignments. Passengers have no direct table access. |
+| Fare engine | Server-side and pure (`computeQuote`). It validates the timeline in `America/Argentina/Buenos_Aires`, checks zones and optional coordinates, and checks seat, per-bag-type and joint baggage capacity. Fare rules are direction-specific and ranked, with a manual-quote fallback. |
+| Booking command | The `create_booking_from_quote` PL/pgSQL function locks the quote, then checks the idempotency key (replay returns the same result; a changed payload returns 409). It also checks session binding, expiry (DB clock), payment mode, lead time, contact and the flight-or-staff-exception rule. It consumes the quote and inserts the booking, trip event, audit row and outbox jobs in **one transaction**. |
+| Public API | One Edge Function (`api`): `GET /api/config`, `POST /api/quotes`, `POST /api/bookings`, `GET /api/bookings/:ref`. It returns consistent JSON errors with request IDs, uses the 400/401/403/404/409/422/429 codes and rate-limits by IP and session. |
+| Passenger web | Spanish (es-AR) and English. Screens: transfer form → quote review (vehicle eligibility with reasons, price hold countdown) → contact & payment mode → "request received, not yet confirmed" → status page (opaque token, stored only as a hash). Mobile-first. |
+| Dispatch | Spanish-first. Daily **Agenda** (timeline per driver plus an unassigned lane), **Reservas** grid, and filters by date, airport, state, driver, payment and free text. Also an alerts strip (unassigned near pickup, expiring holds, flight exceptions), a booking drawer with original address text, map links and event history, and a staff-entered booking form that allows a no-flight exception with a reason. |
+| Seed | Generated from one TypeScript fixtures file (`scripts/gen-seed.ts`), so the demo backend and the DB seed cannot drift. Seed data: 3 vehicle classes (capacities from soytutaxi.com), EZE/AEP with meeting points, 6 zones, 55 demo fare rules, 6 vehicles, 7 drivers and 8 bookings relative to "today". |
+
+## Live staging (26 Nov 2026)
+
+- Supabase project `soytutaxi` (ref `sxjhtsyguacfyixaeydz`, São Paulo). Migrations and demo data applied, `api` Edge Function deployed (`verify_jwt = false`).
+- API base: `https://sxjhtsyguacfyixaeydz.supabase.co/functions/v1/api/api/…` (e.g. `/config`).
+- Front end for GitHub Pages: `VITE_BASE=/soytutaxi/ npm run build` (reads `.env.production.local`), then publish `dist/`. `public/404.html` handles deep links.
+- `STATUS_TOKEN_SECRET` is not set yet, so the function falls back to a value derived from the project's server-only key. Set a dedicated secret before go-live. That invalidates earlier status links.
+- `PUBLIC_APP_URL` is not set, so status links in API responses use the caller's origin. Set it to the full site URL (including `/soytutaxi`) before Phase 3 sends links by WhatsApp or email.
+
+## Quick start
+
+```bash
+npm install
+npm run dev            # demo mode on http://localhost:5173
+#   /             passenger booking
+#   /despacho     dispatch (click "Entrar como despacho (demo)")
+```
+
+## Tests
+
+```bash
+npm test               # 40 unit tests: domain + API handler (MemoryStore)
+npm run test:db        # 17 integration tests on real PostgreSQL (tested on 16)
+npm run build && npx vite preview --port 4173 & npm run test:e2e   # browser smoke test (needs Chrome)
+deno check supabase/functions/api/index.ts
+```
+
+`test:db` recreates a database `soytutaxi_test` via `scripts/db-reset.sh`. That script applies a small Supabase shim (`tests/db/supabase_shim.sql`), then all migrations, then the seed. Set `PGHOST/PGPORT/PGUSER` or `TEST_DATABASE_URL` to point at your server. The integration tests run the **same HTTP handler** as the Edge Function, against the real SQL functions, and cover:
+
+- 10 concurrent identical requests → 1 booking, 9 idempotent replays
+- 10 concurrent requests for one quote with different keys → 1 booking, 9 × `409 quote_already_used`
+- overlap rejection for the same driver and for the same vehicle; back-to-back jobs allowed; released assignments don't block
+- one active assignment per booking; ambiguous fare rules rejected at write time
+- RLS: dispatcher vs non-member vs driver vs finance vs admin; anon can't execute commands
+
+## Deploy to Supabase (staging first)
+
+1. Create a Supabase project, then `supabase link --project-ref <ref>`.
+2. `supabase db push` applies `supabase/migrations/*`. For staging only, run `supabase/seed.sql` (demo data) or leave the tables empty and enter live data through admin.
+3. Set function secrets:
+   ```bash
+   supabase secrets set STATUS_TOKEN_SECRET=$(openssl rand -base64 48) \
+     PUBLIC_APP_URL=https://<your-front-end> OPERATOR_SLUG=soytutaxi \
+     ALLOWED_ORIGINS=https://<your-front-end> RATE_LIMIT_PER_MINUTE=60
+   supabase functions deploy api --no-verify-jwt
+   ```
+4. Front end: set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`, then `npm run build` and host `dist/` with SPA fallback to `index.html`. With those vars set, demo mode turns off automatically.
+5. Staff accounts: create the user in Supabase Auth, then in the SQL editor run
+   `select app.grant_role_by_email('soytutaxi', 'person@soytutaxi.com', 'dispatcher');`
+6. Before production, set `operators.demo_mode = false`. Then insert a **new** `policies` version and real `fare_rules` (`is_demo = false`). Policies are append-only, and each booking records the `policy_id` that governed it.
+
+**Secret rotation:** changing `STATUS_TOKEN_SECRET` invalidates existing passenger status links. That is safe, but tell staff, since passengers will need a new link. **Backups:** use Supabase PITR on production. Restore drills belong in the go-live checklist.
+
+## Layout
+
+```
+supabase/
+  migrations/                 schema, RLS, commands (authoritative business transactions)
+  seed.sql                    GENERATED from fixtures.ts
+  functions/api/index.ts      Edge Function entry (Deno)
+  functions/_shared/domain/   pure TS: types, time, geo, capacity, fare, quote, crypto, fixtures
+  functions/_shared/api/      HTTP handler, Store port, SupabaseStore (Deno), MemoryStore (demo/tests)
+src/                          React + TypeScript + Tailwind front end
+tests/unit | tests/db | tests/e2e
+scripts/gen-seed.ts, scripts/db-reset.sh
+```
+
+The domain code is shared verbatim by Deno, the browser and Node, so there is exactly one fare engine.
+
+## Decisions worth knowing
+
+- **Quote binding.** The browser holds a random guest session ID (`X-Session-Id`), and quotes store only its SHA-256. Staff quotes are bound to `user + session`.
+- **Status links.** The token is `HMAC(secret, operator:idempotencyKey)` and only its hash is stored. That lets an idempotent replay return the *same* status URL without keeping the token in plain text.
+- **Airport pickup time.** Agreed pickup = scheduled arrival + per-airport buffer (demo: EZE 60 min, AEP 30 min). The flight's *local arrival date* is stored separately from the pickup instant, so after-midnight arrivals keep the right flight date.
+- **Manual quotes** are stored, can't be booked through the public API and show a WhatsApp handoff. Demo examples: Tigre (served zone, no rules) and TaxiBus city→EZE (unpriced reverse direction).
+- **Prepaid** bookings start with `collection_state = awaiting_payment`. The payment link comes in Phase 4, once a driver has accepted.
+
+## Known limitations of Phase 1
+
+- **Not built yet:** offers, assignment, reassignment, cancellation and refund commands (Phase 2/4), WhatsApp (Phase 3), payments and flight tracking (Phase 4), voice (optional). The tables and constraints they need already exist, and dispatch shows a note where the actions will go.
+- **Zones** are rough demo rectangles. Replace them with real neighbourhood polygons. Address geocoding is not wired, so coordinates are optional and are only checked against the chosen zone.
+- **Rate limiting** in the function is per isolate. Add a gateway or WAF limit in production.
+- **Demo mode** keeps bookings in memory: a page reload clears passenger bookings created in the demo. The seeded examples come back.
+- **Dispatch auto-refresh** polls every 60 s. Supabase Realtime can replace that in Phase 2.
+- **Live mode** was tested by typechecking under Deno plus integration tests of the same SQL. The thin `SupabaseStore` adapter needs a staging run against a real Supabase project.
+
+## Confirm with SoyTuTaxi before production
+
+Approved tariffs for each direction and vehicle, including reverse and larger-vehicle rates. Combined baggage rules for each class (carry-on limits for Minivan/TaxiBus are assumptions). Lead time, arrival buffers and cancellation policy. Which pay-on-pickup methods are allowed. Charge currency (ARS via Mercado Pago, with USD gated). Real service-zone boundaries. Meeting-point wording at EZE/AEP.
