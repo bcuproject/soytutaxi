@@ -1,0 +1,224 @@
+// WhatsApp end to end against PostgreSQL: webhook → conversation → booking, notifications outbox,
+// staff takeover, permissions. The RPC helper uses the same named arguments as the Edge Function.
+import { execFileSync } from "node:child_process";
+import pg from "pg";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { DEMO_OPERATOR_ID, DEMO_STAFF } from "@shared/domain/fixtures.ts";
+import type { Outbound, ParsedWebhook, Sender } from "@shared/whatsapp/meta.ts";
+import { processOutbox, processWebhook, type ServiceDeps, type WaDb } from "@shared/whatsapp/service.ts";
+import { DB_URL, PgStore } from "./pgStore.ts";
+import { ApiError } from "@shared/api/store.ts";
+
+let pool: pg.Pool;
+const DISPATCHER = DEMO_STAFF[1].userId;
+const q = (sql: string, params: unknown[] = []) => pool.query(sql, params).then((r) => r.rows);
+
+async function rpc<T = any>(fn: string, args: Record<string, unknown>): Promise<T> {
+  const keys = Object.keys(args);
+  const sql = `select public.${fn}(${keys.map((k, i) => `${k} => $${i + 1}`).join(", ")}) as r`;
+  const vals = keys.map((k) => (args[k] !== null && typeof args[k] === "object" ? JSON.stringify(args[k]) : args[k]));
+  try {
+    const rows = await q(sql, vals);
+    return rows[0].r as T;
+  } catch (e: any) {
+    if (/^[a-z_]+$/.test(e.message)) throw new ApiError(Number(e.detail) || 400, e.message, e.hint ?? e.message);
+    throw e;
+  }
+}
+
+const waDb: WaDb = {
+  openConversation: async (op, wa, name) => (await q("select (public.wa_open_conversation(p_operator => $1, p_wa_id => $2, p_profile_name => $3)).*", [op, wa, name]))[0],
+  saveConversation: (id, v, step, draft, locale, lastBooking, needsStaff) =>
+    rpc("wa_save_conversation", { p_id: id, p_expected_version: v, p_step: step, p_draft: draft, p_locale: locale, p_last_booking: lastBooking, p_needs_staff: needsStaff }),
+  recordMessage: (c, dir, pid, kind, body, preview, status, sentBy = null) =>
+    rpc("wa_record_message", { p_conversation: c, p_direction: dir, p_provider_id: pid, p_kind: kind, p_body: body, p_preview: preview, p_status: status, p_sent_by: sentBy }),
+  markSent: (id, pid, status, error = null) => rpc("wa_mark_sent", { p_message: id, p_provider_id: pid, p_status: status, p_error: error }),
+  statusUpdate: (pid, status, error = null) => rpc("wa_status_update", { p_provider_id: pid, p_status: status, p_error: error }),
+  inboxClaim: (op, key) => rpc("wa_inbox_claim", { p_operator: op, p_event_key: key }),
+  inboxDone: (key) => rpc("wa_inbox_done", { p_event_key: key }),
+  bookingsForPhone: (op, phone) => rpc("wa_bookings_for_phone", { p_operator: op, p_phone: phone }),
+  driverRespond: (d, o, a) => rpc("wa_driver_respond", { p_driver: d, p_offer: o, p_accept: a }),
+  outboxClaim: async (limit) => q("select * from public.wa_outbox_claim(p_limit => $1)", [limit]),
+  outboxFinish: (job, ok, error, final) => rpc("wa_outbox_finish", { p_job: job, p_ok: ok, p_error: error, p_final: final }),
+  notificationContext: (kind, payload) => rpc("wa_notification_context", { p_kind: kind, p_payload: payload }),
+  openConversationForNotify: (op, wa) => rpc("wa_open_conversation_for_notify", { p_operator: op, p_wa_id: wa }),
+};
+
+const sent: { to: string; m: Outbound }[] = [];
+let n = 0;
+const sender: Sender = { async send(to, m) { sent.push({ to, m }); return { id: `wamid.out${++n}` }; } };
+let deps: ServiceDeps;
+let seq = 0;
+
+const PAX = "447700900555";
+const hook = (m: Record<string, unknown>, from = PAX, name = "Grace Hopper"): ParsedWebhook => ({
+  phoneNumberId: "1", statuses: [],
+  messages: [{ id: `wamid.in${++seq}`, from, profileName: name, timestamp: 0, rawType: "text", type: "text", ...m } as any],
+});
+const say = (text: string, from?: string) => processWebhook(hook({ type: "text", text }, from), deps);
+const tap = (id: string, from?: string) => processWebhook(hook({ type: "reply", replyId: id, replyTitle: id, rawType: "interactive" }, from), deps);
+const lastText = () => { const m = sent.at(-1)!.m; return "text" in m ? m.text : ""; };
+const conv = async (wa = PAX) => (await q("select * from wa_conversations where wa_id = $1", [wa]))[0];
+
+beforeAll(async () => {
+  execFileSync("bash", ["scripts/db-reset.sh"], { stdio: "pipe" });
+  pool = new pg.Pool({ connectionString: DB_URL, max: 10 });
+  await q(`insert into auth.users (id, email) values ($1,$2)`, [DISPATCHER, DEMO_STAFF[1].email]);
+  await q("select app.grant_role_by_email('soytutaxi', $1, 'dispatcher')", [DEMO_STAFF[1].email]);
+  const store = new PgStore(pool);
+  deps = {
+    db: waDb, store, sender, statusTokenSecret: "test-secret", publicAppUrl: "https://example.test",
+    config: async () => (await store.loadConfig("soytutaxi"))!,
+  };
+});
+afterAll(async () => { await pool?.end(); });
+
+describe("WhatsApp webhook → booking (database)", () => {
+  it("books a transfer through the chat and stores the conversation", async () => {
+    await say("Hola, necesito ir de Recoleta a Aeroparque pasado mañana a las 08:00, somos 2 con 2 valijas y 1 de mano");
+    expect(lastText() || JSON.stringify(sent.at(-1)!.m)).toContain("Recoleta");          // asks for the address
+    await say("Av. Alvear 1891");
+    const review = sent.at(-1)!.m as Extract<Outbound, { type: "buttons" }>;
+    expect(review.text).toContain("Revisá tu viaje");
+    await tap("review:confirm");
+    await tap("name:profile");
+    await tap("pay:pay_on_pickup_cash");
+    expect(lastText()).toMatch(/STT-[A-Z0-9]{6}/);
+    const ref = lastText().match(/STT-[A-Z0-9]{6}/)![0];
+    const [b] = await q("select b.*, p.phone_e164, p.full_name from bookings b join passengers p on p.id = b.passenger_id where reference = $1", [ref]);
+    expect(b).toMatchObject({ source: "whatsapp", state: "needs_driver", phone_e164: "+447700900555", full_name: "Grace Hopper", payment_mode: "pay_on_pickup_cash" });
+    const c = await conv();
+    expect(c).toMatchObject({ step: "done", kind: "passenger", last_booking_id: b.id });
+    const msgs = await q("select direction, status from wa_messages where conversation_id = $1 order by created_at", [c.id]);
+    expect(msgs.filter((m) => m.direction === "in")).toHaveLength(5);
+    expect(msgs.filter((m) => m.direction === "out").every((m) => m.status === "sent")).toBe(true);
+  });
+
+  it("Meta retries of the same message are processed once", async () => {
+    const h = hook({ type: "text", text: "mi reserva" });
+    const before = sent.length;
+    expect(await processWebhook(h, deps)).toEqual({ handled: 1, skipped: 0 });
+    expect(await processWebhook(h, deps)).toEqual({ handled: 0, skipped: 1 });
+    expect(sent.length).toBe(before + 1);
+    expect(lastText()).toContain("STT-");
+  });
+
+  it("delivery receipts never move a message backwards", async () => {
+    const [m] = await q("select provider_message_id from wa_messages where direction = 'out' and status = 'sent' limit 1");
+    await waDb.statusUpdate(m.provider_message_id, "read");
+    await waDb.statusUpdate(m.provider_message_id, "delivered");
+    expect((await q("select status from wa_messages where provider_message_id = $1", [m.provider_message_id]))[0].status).toBe("read");
+  });
+
+  it("stale conversation versions are rejected (optimistic lock)", async () => {
+    const c = await conv();
+    expect(await waDb.saveConversation(c.id, c.version - 1, "menu", {}, "es-AR", null, null)).toBeNull();
+    expect(await waDb.saveConversation(c.id, c.version, c.step, c.draft, c.locale, null, null)).toBe(c.version + 1);
+  });
+
+  it("when staff take over, the bot stays quiet; handing back resets to the menu", async () => {
+    const c = await conv();
+    const take = async (t: boolean) => {
+      const cl = await pool.connect();
+      try {
+        await cl.query("begin"); await cl.query("set local role authenticated");
+        await cl.query("select set_config('request.jwt.claim.sub', $1, true)", [DISPATCHER]);
+        const r = await cl.query("select dispatch_wa_takeover($1, $2) as r", [c.id, t]);
+        await cl.query("commit"); return r.rows[0].r;
+      } catch (e) { await cl.query("rollback"); throw e; } finally { cl.release(); }
+    };
+    await take(true);
+    const before = sent.length;
+    await say("hola? necesito cambiar la hora");
+    expect(sent.length).toBe(before);
+    expect((await q("select count(*)::int as n from wa_messages where conversation_id = $1 and preview like 'hola? necesito%'", [c.id]))[0].n).toBe(1);
+    await take(false);
+    expect(await conv()).toMatchObject({ handoff_owner: null, step: "menu" });
+  });
+
+  it("drivers' verified numbers are recognised and can accept offers by button", async () => {
+    const [b] = await q("select id, reference from bookings where reference = 'STT-DEM004'");
+    const did = "f6666666-0000-4000-8000-000000000003";   // Diego, sedan
+    await q(`insert into driver_availability (operator_id, driver_id, kind, during) values ($1, $2, 'available', tstzrange(now() - interval '1 day', now() + interval '10 days', '[)'))`, [DEMO_OPERATOR_ID, did]);
+    const [o] = await q(`insert into booking_offers (operator_id, booking_id, driver_id, vehicle_id, generation, expires_at, earnings_minor, earnings_currency)
+      select operator_id, id, $2, app.driver_vehicle_at($2, agreed_pickup_at), offer_generation, now() + interval '10 minutes', 2400, currency from bookings where id = $1 returning id`, [b.id, did]);
+    await say("hola", "5491100000003");
+    expect((await conv("5491100000003")).kind).toBe("driver");
+    await tap(`offer:${o.id}:a`, "5491100000003");
+    expect(lastText()).toContain("STT-DEM004");
+    expect((await q("select state from bookings where id = $1", [b.id]))[0].state).not.toBe("needs_driver");
+  });
+});
+
+describe("Notifications outbox (database)", () => {
+  it("confirmed and cancelled notices go to passengers inside the 24 h window; others are closed with a reason", async () => {
+    await q("update outbox_jobs set state = 'done' where kind like 'notify.%'");
+    const [b] = await q("select b.id from bookings b join passengers p on p.id = b.passenger_id where p.phone_e164 = '+447700900555'");
+    await q("insert into outbox_jobs (operator_id, kind, dedupe_key, payload) values ($1, 'notify.passenger.cancelled', 'x1', jsonb_build_object('booking_id', $2::uuid))", [DEMO_OPERATOR_ID, b.id]);
+    // Passenger with no WhatsApp chat → outside the window and no template configured.
+    const [d] = await q("select id from bookings where reference = 'STT-DEM002'");
+    await q("insert into outbox_jobs (operator_id, kind, dedupe_key, payload) values ($1, 'notify.passenger.confirmed', 'x2', jsonb_build_object('booking_id', $2::uuid))", [DEMO_OPERATOR_ID, d.id]);
+    const before = sent.length;
+    expect(await processOutbox(deps)).toEqual({ sent: 1, skipped: 1, failed: 0 });
+    expect(sent.length).toBe(before + 1);
+    expect(sent.at(-1)!.to).toBe(PAX);
+    expect(lastText()).toContain("cancelada");
+    const jobs = await q("select dedupe_key, state, last_error from outbox_jobs where dedupe_key in ('x1','x2') order by dedupe_key");
+    expect(jobs).toEqual([{ dedupe_key: "x1", state: "done", last_error: null }, { dedupe_key: "x2", state: "done", last_error: "no_template" }]);
+  });
+
+  it("uses an approved template outside the window when one is configured", async () => {
+    deps.templates = { "notify.passenger.confirmed": { name: "trip_confirmed", language: "es_AR" } };
+    const [d] = await q("select id from bookings where reference = 'STT-DEM002'");
+    await q("insert into outbox_jobs (operator_id, kind, dedupe_key, payload) values ($1, 'notify.passenger.confirmed', 'x3', jsonb_build_object('booking_id', $2::uuid))", [DEMO_OPERATOR_ID, d.id]);
+    await processOutbox(deps);
+    const m = sent.at(-1)!.m as Extract<Outbound, { type: "template" }>;
+    expect(m).toMatchObject({ type: "template", name: "trip_confirmed", language: "es_AR" });
+    expect(m.params[0]).toBe("STT-DEM002");
+    expect(sent.at(-1)!.to).toBe("5491155550002");
+    // The notice appears in the dispatch inbox under a conversation that did NOT open the 24 h window.
+    expect(await conv("5491155550002")).toMatchObject({ last_inbound_at: null });
+    deps.templates = {};
+  });
+
+  it("failed sends back off and retry; 4xx errors are final", async () => {
+    const failing: Sender = { async send() { return { error: "503 upstream" }; } };
+    const [b] = await q("select b.id from bookings b join passengers p on p.id = b.passenger_id where p.phone_e164 = '+447700900555'");
+    await q("insert into outbox_jobs (operator_id, kind, dedupe_key, payload) values ($1, 'notify.passenger.cancelled', 'x4', jsonb_build_object('booking_id', $2::uuid))", [DEMO_OPERATOR_ID, b.id]);
+    await processOutbox({ ...deps, sender: failing });
+    let [j] = await q("select state, attempts, next_attempt_at > now() + interval '30 seconds' as later from outbox_jobs where dedupe_key = 'x4'");
+    expect(j).toMatchObject({ state: "pending", attempts: 1, later: true });
+    await q("update outbox_jobs set next_attempt_at = now() where dedupe_key = 'x4'");
+    await processOutbox({ ...deps, sender: { async send() { return { error: "400 131026 Message undeliverable" }; } } });
+    [j] = await q("select state from outbox_jobs where dedupe_key = 'x4'");
+    expect(j.state).toBe("dead");
+  });
+});
+
+describe("WhatsApp permissions", () => {
+  it("service functions are closed to browsers; the outbox key is checked; staff can read the inbox", async () => {
+    for (const role of ["anon", "authenticated"]) {
+      const c = await pool.connect();
+      try {
+        await c.query("begin"); await c.query(`set local role ${role}`);
+        await expect(c.query("select wa_open_conversation($1, '5491100000099', null)", [DEMO_OPERATOR_ID])).rejects.toThrow(/permission denied/);
+      } finally { await c.query("rollback"); c.release(); }
+    }
+    const [{ value: key }] = await q("select value from app.private_settings where key = 'outbox_key'");
+    expect(await rpc("wa_outbox_key_ok", { p_key: key })).toBe(true);
+    expect(await rpc("wa_outbox_key_ok", { p_key: "x".repeat(64) })).toBe(false);
+    expect(await rpc("wa_outbox_key_ok", { p_key: "" })).toBe(false);
+    await q("select app.kick_whatsapp_outbox()");   // no functions_url yet → harmless no-op
+
+    const read = async (sub: string | null) => {
+      const c = await pool.connect();
+      try {
+        await c.query("begin"); await c.query("set local role authenticated");
+        if (sub) await c.query("select set_config('request.jwt.claim.sub', $1, true)", [sub]);
+        return (await c.query("select count(*)::int as n from wa_messages")).rows[0].n;
+      } finally { await c.query("rollback"); c.release(); }
+    };
+    expect(await read(DISPATCHER)).toBeGreaterThan(5);
+    expect(await read("00000000-0000-4000-8000-0000000000aa")).toBe(0);
+  });
+});

@@ -78,6 +78,22 @@ await page.screenshot({ path: `${SHOTS}/7-drawer.png` });
 await page.keyboard.press("Escape");
 
 // Staff booking without flight → requires reason
+// WhatsApp inbox
+await clickText('[role="tab"]', "WhatsApp");
+await page.waitForSelector('[data-testid="wa-inbox"]');
+await clickText('[data-testid="wa-inbox"] button', "Tom Baker");
+await page.waitForSelector('[data-testid="wa-thread"]');
+assert(await page.$eval('[data-testid="wa-thread"]', (t) => t.innerText.includes("9 people")), "whatsapp thread shows the passenger's messages");
+await clickText("button", "Tomar conversación");
+await page.waitForSelector("textarea");
+await page.type("textarea", "Hola Tom, para 9 con equipaje te mando una Combi: USD 85.");
+await page.keyboard.press("Enter");
+await page.waitForFunction(() => document.querySelector('[data-testid="wa-thread"]').innerText.includes("USD 85"));
+assert(true, "staff took over and replied in the WhatsApp inbox");
+await page.screenshot({ path: `${SHOTS}/7-whatsapp.png` });
+await clickText("button", "Devolver al bot");
+await clickText('[role="tab"]', "Agenda");
+
 await page.evaluate(() => { history.pushState({}, "", "/despacho/nueva"); dispatchEvent(new PopStateEvent("popstate")); });
 await page.waitForSelector('[data-testid="zone"]');
 await page.select('[data-testid="zone"]', "recoleta");

@@ -29,6 +29,15 @@ export interface StaffSession {
   label: string;
 }
 
+export interface WaConversation {
+  id: string; waId: string; phone: string; name: string | null; kind: "passenger" | "driver"; locale: string; step: string;
+  needsStaff: boolean; handoffOwner: string | null; handledByMe: boolean; windowOpen: boolean; version: number;
+  lastBookingRef: string | null; lastPreview: string | null; lastDirection: "in" | "out" | null; lastAt: string | null; updatedAt: string;
+}
+export interface WaMessage {
+  id: string; direction: "in" | "out"; kind: string; preview: string; status: string; error: string | null; staff: boolean; at: string;
+}
+
 export interface Backend {
   mode: "demo" | "live";
   api<T>(method: "GET" | "POST", path: string, body?: unknown, headers?: Record<string, string>): Promise<T>;
@@ -66,6 +75,12 @@ export interface Backend {
 
   // --- Walkie-talkie -----------------------------------------------------------------------------
   radioToken(): Promise<{ url: string; token: string; room: string; name: string }>;
+
+  // --- WhatsApp inbox ----------------------------------------------------------------------------
+  waConversations(): Promise<WaConversation[]>;
+  waMessages(conversationId: string): Promise<WaMessage[]>;
+  waTakeover(conversationId: string, take: boolean): Promise<void>;
+  waSend(conversationId: string, text: string): Promise<void>;
 }
 
 export interface BoardRow {
@@ -233,6 +248,47 @@ class DemoBackend implements Backend {
   async giveBack(): Promise<{ outcome: string; on_board: boolean }> { throw LIVE_ONLY(); }
   async boardAction(): Promise<void> { throw LIVE_ONLY(); }
   async radioToken(): Promise<{ url: string; token: string; room: string; name: string }> { throw LIVE_ONLY(); }
+
+  private wa = demoWhatsApp();
+  async waConversations() { return [...this.wa.convs].sort((a, b) => (b.lastAt ?? "").localeCompare(a.lastAt ?? "")); }
+  async waMessages(id: string) { return this.wa.msgs[id] ?? []; }
+  async waTakeover(id: string, take: boolean) {
+    const c = this.wa.convs.find((x) => x.id === id)!;
+    Object.assign(c, take ? { handoffOwner: "demo", handledByMe: true } : { handoffOwner: null, handledByMe: false, needsStaff: false, step: "menu" });
+  }
+  async waSend(id: string, text: string) {
+    const c = this.wa.convs.find((x) => x.id === id)!;
+    const at = new Date().toISOString();
+    (this.wa.msgs[id] ??= []).push({ id: `m${Date.now()}`, direction: "out", kind: "text", preview: text, status: "sent", error: null, staff: true, at });
+    Object.assign(c, { lastPreview: text, lastDirection: "out", lastAt: at });
+  }
+}
+
+function demoWhatsApp() {
+  const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
+  const conv = (id: string, name: string, waId: string, o: Partial<WaConversation>): WaConversation => ({
+    id, waId, phone: `+${waId}`, name, kind: "passenger", locale: "es-AR", step: "done", needsStaff: false, handoffOwner: null,
+    handledByMe: false, windowOpen: true, version: 1, lastBookingRef: null, lastPreview: null, lastDirection: null, lastAt: null, updatedAt: ago(0), ...o,
+  });
+  const m = (dir: "in" | "out", preview: string, min: number, staff = false): WaMessage =>
+    ({ id: `${dir}${min}${preview.length}`, direction: dir, kind: dir === "in" ? "text" : "interactive", preview, status: dir === "in" ? "received" : "read", error: null, staff, at: ago(min) });
+  const msgs: Record<string, WaMessage[]> = {
+    w1: [m("in", "Hola! Llego a Ezeiza mañana 06:40 en el AR1303, voy a Palermo, somos 2 con 2 valijas", 42),
+         m("out", "¿Cuál es la dirección o el hotel en *Palermo*?", 42), m("in", "Honduras 5600", 41),
+         m("out", "*Revisá tu viaje* 📝\n\n🛬 EZE → Honduras 5600 (Palermo)\n🗓️ sáb 28 nov · 07:40\n💰 USD 30,00 (DEMO)\n[✅ Confirmar] [✏️ Cambiar] [👤 Hablar c/ alguien]", 41),
+         m("in", "▸ ✅ Confirmar", 40), m("out", "✅ *Recibimos tu solicitud STT-DEM001*", 39)],
+    w2: [m("in", "Hi, we are 9 people with lots of luggage going to AEP on Sunday", 12),
+         m("out", "A team member will sort out this group and luggage — I've let them know 👤", 12), m("in", "Thanks! how much would it be?", 6)],
+    w3: [m("out", "🚕 *Nueva oferta STT-DEM004*\n🛬 EZE (AA997) → Puerto Madero\n💰 Ganás *USD 24,00*\n[✅ Aceptar] [❌ Rechazar]", 20), m("in", "▸ ✅ Aceptar", 19),
+         m("out", "✅ ¡El viaje STT-DEM004 es tuyo!", 19)],
+  };
+  const last = (id: string) => { const x = msgs[id].at(-1)!; return { lastPreview: x.preview, lastDirection: x.direction, lastAt: x.at }; };
+  const convs = [
+    conv("w1", "Emma Wilson", "447700900001", { lastBookingRef: "STT-DEM001", locale: "en", ...last("w1") }),
+    conv("w2", "Tom Baker", "447700900777", { needsStaff: true, step: "handoff", locale: "en", ...last("w2") }),
+    conv("w3", "Diego Romero", "5491100000003", { kind: "driver", ...last("w3") }),
+  ];
+  return { convs, msgs };
 }
 
 // --- live (Supabase) ----------------------------------------------------------------------------
@@ -325,7 +381,7 @@ class SupabaseBackend implements Backend {
   }
   subscribe(onChange: (table: string) => void) {
     const ch = this.sb.channel(`live-${Math.random().toString(36).slice(2)}`);
-    for (const table of ["driver_locations", "bookings", "assignments", "booking_offers"]) {
+    for (const table of ["driver_locations", "bookings", "assignments", "booking_offers", "wa_conversations", "wa_messages"]) {
       ch.on("postgres_changes" as never, { event: "*", schema: "public", table } as never, () => onChange(table));
     }
     ch.subscribe();
@@ -351,6 +407,34 @@ class SupabaseBackend implements Backend {
   }
   async boardAction(bookingId: string, action: "hold" | "publish" | "auto", version: number) {
     await this.rpc("dispatch_board", { p_booking: bookingId, p_action: action, p_expected_version: version });
+  }
+  async waConversations(): Promise<WaConversation[]> {
+    const { data, error } = await this.sb.from("dispatch_wa_inbox").select("*").order("updated_at", { ascending: false }).limit(150);
+    if (error) throw new CommandError(error.message);
+    // deno-lint-ignore no-explicit-any
+    return (data ?? []).map((r: any) => ({
+      id: r.id, waId: r.wa_id, phone: r.phone_e164, name: r.profile_name, kind: r.kind, locale: r.locale, step: r.step,
+      needsStaff: r.needs_staff, handoffOwner: r.handoff_owner, handledByMe: !!r.handled_by_me, windowOpen: !!r.window_open, version: r.version,
+      lastBookingRef: r.last_booking_reference, lastPreview: r.last_preview, lastDirection: r.last_direction, lastAt: r.last_message_at, updatedAt: r.updated_at,
+    }));
+  }
+  async waMessages(conversationId: string): Promise<WaMessage[]> {
+    const { data, error } = await this.sb.from("wa_messages").select("id, direction, kind, preview, status, error, sent_by, created_at")
+      .eq("conversation_id", conversationId).order("created_at", { ascending: true }).limit(300);
+    if (error) throw new CommandError(error.message);
+    // deno-lint-ignore no-explicit-any
+    return (data ?? []).map((r: any) => ({ id: r.id, direction: r.direction, kind: r.kind, preview: r.preview, status: r.status, error: r.error, staff: !!r.sent_by, at: r.created_at }));
+  }
+  async waTakeover(conversationId: string, take: boolean) { await this.rpc("dispatch_wa_takeover", { p_conversation: conversationId, p_take: take }); }
+  async waSend(conversationId: string, text: string) {
+    const { data } = await this.sb.auth.getSession();
+    if (!data.session) throw new CommandError("unauthenticated");
+    const res = await fetch(`${this.url}/functions/v1/whatsapp/staff-send`, {
+      method: "POST", headers: { apikey: this.anonKey, authorization: `Bearer ${data.session.access_token}`, "content-type": "application/json" },
+      body: JSON.stringify({ conversationId, text }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new CommandError(body?.error?.code ?? "send_failed", body?.error?.message);
   }
   async radioToken() {
     const { data } = await this.sb.auth.getSession();

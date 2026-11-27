@@ -35,6 +35,15 @@ This release is the dispatch backend and web front end for Buenos Aires transfer
 - **Dispatch control:** the booking drawer can **Retener** (keep off the board), **Publicar en la bolsa**, start or stop **Oferta automática**, offer manually or assign directly. The grid and drawer show the board status.
 - All numbers are optional policy keys. If a key is absent, the default applies.
 
+## WhatsApp booking chat (Phase 3)
+
+- **Passengers** book in Spanish or English by free text ("Llego a Ezeiza mañana 10:30 en AR1303, voy a Palermo, somos 2"), buttons and lists, or a shared 📍 location. The bot asks only for missing details, then shows the fixed price for review. It books through the same `computeQuote` and `create_booking_from_quote` as the website, so the channel cannot price or book differently. AI extraction is optional: with `AI_API_KEY` set, the Lovable gateway reads long messages, but its output is re-validated before use. Without the key, the built-in parser and buttons are used.
+- **Commands:** *mi reserva* / *my booking*, *staff*, *cancelar*, *EN* / *ES*. Unpriced routes and loads that need a larger vehicle are handed to staff.
+- **Dispatch → WhatsApp tab:** every chat, with a *pide persona* badge, **Tomar conversación** (pauses the bot), staff replies (within Meta's 24 h window), and **Devolver al bot**.
+- **Notifications:** pg_cron calls `/whatsapp/outbox` every minute (pg_net, shared key in `app.private_settings`). Passengers get *confirmed* and *cancelled* notices, and verified drivers get offers with **Aceptar/Rechazar** buttons. Outside 24 h, an approved template is used if one is configured, otherwise the job is closed with reason `no_template`.
+- **Security:** the webhook checks `X-Hub-Signature-256` with `WHATSAPP_APP_SECRET`. Each message is processed once (inbox de-duplication). Conversation state uses optimistic locking. All `wa_*` functions are callable by the service role only.
+- **Setup:** see [docs/WHATSAPP_SETUP.md](docs/WHATSAPP_SETUP.md) (Meta test number, secrets, webhook URL).
+
 ## Live staging (26 Nov 2026)
 
 - Supabase project `soytutaxi` (ref `sxjhtsyguacfyixaeydz`, São Paulo). Migrations and demo data applied, `api` Edge Function deployed (`verify_jwt = false`).

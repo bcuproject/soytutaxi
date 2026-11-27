@@ -6,12 +6,13 @@ import { Badge, Button, Field, Input, Logo, Select } from "../components/ui";
 import { backend, CommandError, type BoardRow, type DispatchRow, type StaffSession, type TripEvent } from "../lib/backend";
 import { DriverMap, STATUS_COLOR, STATUS_ES } from "../components/DriverMap";
 import { Radio } from "../components/Radio";
+import { WhatsAppInbox } from "../components/WhatsAppInbox";
 import { cx, fmtDateTime, fmtLocalDate, fmtTime, formatMoney } from "../lib/format";
 import { useConfig } from "./BookingPage";
 
 // Spanish-first operational screen. Labels are centralised for later locale work.
 const L = {
-  title: "Despacho", bookings: "Reservas", schedule: "Agenda", map: "Mapa", today: "Hoy", tomorrow: "Mañana",
+  title: "Despacho", bookings: "Reservas", schedule: "Agenda", map: "Mapa", whatsapp: "WhatsApp", today: "Hoy", tomorrow: "Mañana",
   all: "Todos", airport: "Aeropuerto", state: "Estado", driver: "Chofer", payment: "Pago", search: "Buscar ref., pasajero, vuelo…",
   unassigned: "Sin asignar", none: "No hay reservas para este día con estos filtros.", newBooking: "Nueva reserva",
   signIn: "Ingresar", signOut: "Salir", alerts: "Alertas",
@@ -74,7 +75,14 @@ export default function DispatchPage() {
 function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: () => void }) {
   const today = utcToLocalDate(new Date());
   const [date, setDate] = useState(addDaysLocal(today, 1));
-  const [tab, setTab] = useState<"schedule" | "map" | "bookings">("schedule");
+  const [tab, setTab] = useState<"schedule" | "map" | "bookings" | "whatsapp">("schedule");
+  const [waPending, setWaPending] = useState(0);
+  useEffect(() => {
+    const tick = () => backend.waConversations().then((c) => setWaPending(c.filter((x) => x.needsStaff && !x.handoffOwner).length)).catch(() => {});
+    tick();
+    const i = setInterval(tick, 30_000);
+    return () => clearInterval(i);
+  }, []);
   const [board, setBoard] = useState<BoardRow[]>([]);
   const [rows, setRows] = useState<DispatchRow[]>([]);
   const [drivers, setDrivers] = useState<Driver[]>([]);
@@ -148,9 +156,11 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
           <Logo />
           <span className="rounded-md bg-ink-800 px-2 py-0.5 text-xs font-semibold text-ink-300">{L.title}</span>
           <nav className="ml-4 flex gap-1 rounded-lg bg-ink-900 p-1" role="tablist">
-            {(["schedule", "map", "bookings"] as const).map((k) => (
+            {(["schedule", "map", "bookings", "whatsapp"] as const).map((k) => (
               <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)}
-                className={cx("rounded-md px-3 py-1.5 text-sm font-medium", tab === k ? "bg-ink-700 text-white" : "text-ink-400 hover:text-white")}>{L[k]}</button>
+                className={cx("rounded-md px-3 py-1.5 text-sm font-medium", tab === k ? "bg-ink-700 text-white" : "text-ink-400 hover:text-white")}>
+                {L[k]}{k === "whatsapp" && waPending > 0 && <span className="ml-1.5 rounded-full bg-red-500 px-1.5 text-[11px] font-bold text-white">{waPending}</span>}
+              </button>
             ))}
           </nav>
           <div className="ml-auto flex items-center gap-3 text-sm">
@@ -161,7 +171,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
           </div>
         </div>
 
-        <div className="flex flex-wrap items-end gap-3 border-t border-ink-800 px-5 py-3">
+        <div className={cx("flex flex-wrap items-end gap-3 border-t border-ink-800 px-5 py-3", tab === "whatsapp" && "hidden")}>
           <div className="flex items-center gap-1">
             <Button variant="outline" className="px-3 py-2" aria-label="Día anterior" onClick={() => setDate(addDaysLocal(date, -1))}>‹</Button>
             <div className="w-44"><Input type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} className="py-2" aria-label="Fecha" /></div>
@@ -181,7 +191,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
       </header>
 
       <div className="px-5 py-5">
-        <div className="mb-4 flex flex-wrap items-center gap-x-6 gap-y-2">
+        <div className={cx("mb-4 flex flex-wrap items-center gap-x-6 gap-y-2", tab === "whatsapp" && "hidden")}>
           <h1 className="text-lg font-semibold first-letter:uppercase">{fmtLocalDate(date)}</h1>
           <Stat n={counts.total} label="viajes" />
           <Stat n={counts.needs} label="sin chofer" tone="text-amber-300" />
@@ -192,7 +202,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
 
         {error && <p role="alert" className="mb-4 rounded-xl bg-red-500/10 px-4 py-3 text-sm text-red-300">No se pudieron cargar las reservas: {error}</p>}
 
-        {alerts.length > 0 && (
+        {alerts.length > 0 && tab !== "whatsapp" && (
           <div className="mb-5 rounded-2xl border border-amber-500/25 bg-amber-500/5 p-3">
             <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-amber-300">{L.alerts} · {alerts.length}</div>
             <div className="flex flex-wrap gap-2">
@@ -206,6 +216,10 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
         {tab === "schedule" && <Schedule date={date} turnaround={turnaround} rows={filtered} drivers={drivers.filter((d) => d.approvalStatus === "approved" && d.active)} onSelect={setSelected} />}
         {tab === "map" && <MapPanel board={board} rows={rows} onSelectBooking={setSelected} />}
         {tab === "bookings" && <BookingsGrid rows={filtered} onSelect={setSelected} />}
+        {tab === "whatsapp" && <WhatsAppInbox onCount={setWaPending} onOpenBooking={(ref) => {
+          const r = rows.find((x) => x.reference === ref);
+          if (r) setSelected(r); else { setQ(ref); setTab("bookings"); }
+        }} />}
       </div>
 
       {selected && <BookingDrawer row={selected} drivers={drivers} board={board} onChanged={load} onClose={() => setSelected(null)} />}
