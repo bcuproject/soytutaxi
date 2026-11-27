@@ -170,6 +170,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
           </nav>
           <div className="ml-auto flex items-center gap-3 text-sm">
             <Radio compact disabled={backend.mode === "demo"} />
+            <PaymentSettingsButton />
             <Link to="/central" className="text-ink-300 hover:text-white">Central →</Link>
             <Link to="/despacho/nueva"><Button className="py-2">+ {L.newBooking}</Button></Link>
             <span className="hidden text-ink-400 md:inline">{session.label}</span>
@@ -424,7 +425,9 @@ const ERR_ES: Record<string, string> = {
   vehicle_not_allocated_to_driver: "Ese vehículo no está asignado al chofer.", driver_not_approved: "Chofer no aprobado o inactivo.",
   no_eligible_drivers: "No hay choferes libres y habilitados para este viaje.", booking_not_open: "Solo se ofrecen reservas sin chofer.",
   reason_required: "Indicá un motivo.", booking_closed: "La reserva ya está cerrada o cancelada.", no_active_driver: "La reserva no tiene chofer activo.",
-  forbidden: "Tu usuario no tiene permiso de despacho.", live_only: "Disponible solo en modo en vivo (con Supabase).",
+  forbidden: "Tu usuario no tiene permiso para esto.", driver_conflict: "El chofer tiene otro viaje a ese horario.",
+  no_proposal: "Ya no hay un cambio sugerido.", invalid_amount: "Monto inválido (no puede superar lo cobrado sin reembolsar).",
+  no_payment: "No hay un pago aprobado para reembolsar.", invalid_settings: "Revisá la moneda y el tipo de cambio.", live_only: "Disponible solo en modo en vivo (con Supabase).",
 };
 function boardLabel(r: DispatchRow): { tone: string; text: string } | null {
   if (r.state !== "needs_driver") return r.claimSource === "board" ? { tone: "neutral", text: "Tomado de la bolsa" } : null;
@@ -530,7 +533,8 @@ function BookingDrawer({ row: r, drivers, board, onChanged, onClose }: { row: Di
           <div className={item}><dt className="text-ink-400">Desde</dt><dd>{r.pickupPlace.label} <a className="ml-1 text-xs text-cab-400" href={mapsUrl(r.pickupPlace.label)} target="_blank" rel="noreferrer">mapa</a>
             {(r.pickupPlace as { kind?: string }).kind !== "airport" && r.pickupPlace.originalText && r.pickupPlace.originalText !== r.pickupPlace.label && <div className="text-xs text-ink-400">Texto original: “{r.pickupPlace.originalText}”</div>}</dd></div>
           <div className={item}><dt className="text-ink-400">Hasta</dt><dd>{r.dropoffPlace.label} <a className="ml-1 text-xs text-cab-400" href={mapsUrl(r.dropoffPlace.label)} target="_blank" rel="noreferrer">mapa</a></dd></div>
-          <div className={item}><dt className="text-ink-400">{L.flight}</dt><dd className="font-mono">{r.flightDesignator ? `${r.flightDesignator} · llegada ${r.flightLocalArrivalDate}` : r.flightExceptionReason ? `Excepción: ${r.flightExceptionReason}` : "—"}</dd></div>
+          <div className={item}><dt className="text-ink-400">{L.flight}</dt><dd><span className="font-mono">{r.flightDesignator ? `${r.flightDesignator} · llegada ${r.flightLocalArrivalDate}` : r.flightExceptionReason ? `Excepción: ${r.flightExceptionReason}` : "—"}</span>
+            {r.flightDesignator && <FlightLine r={r} />}</dd></div>
           <div className={item}><dt className="text-ink-400">{L.vehicle}</dt><dd>{VC_ES[r.vehicleClass]} · {r.passengers} pax · {r.largeBags} valijas · {r.carryOn} mano</dd></div>
           <div className={item}><dt className="text-ink-400">{L.passenger}</dt><dd>{r.passengerName}<div className="text-xs text-ink-300">{[r.passengerPhone, r.passengerEmail].filter(Boolean).join(" · ")}</div></dd></div>
           <div className={item}><dt className="text-ink-400">{L.money}</dt><dd>{r.amountMinor !== null ? formatMoney(r.amountMinor, r.currency!, "es-AR") : "—"} · {PAY_ES[r.paymentMode]} ({COLLECT_ES[r.collectionState] || "—"})</dd></div>
@@ -538,6 +542,8 @@ function BookingDrawer({ row: r, drivers, board, onChanged, onClose }: { row: Di
           {r.notes && <div className={item}><dt className="text-ink-400">{L.notes}</dt><dd>{r.notes}</dd></div>}
         </dl>
 
+        {r.proposedPickupAt && <PickupProposal r={r} onChanged={onChanged} />}
+        <PaymentBox r={r} onChanged={onChanged} />
         <BookingActions r={r} drivers={drivers} board={board} onChanged={onChanged} />
 
         <h3 className="mb-2 mt-6 text-xs font-semibold uppercase tracking-wide text-ink-400">{L.timeline}</h3>
@@ -559,5 +565,152 @@ function BookingDrawer({ row: r, drivers, board, onChanged, onClose }: { row: Di
         </ol>
       </aside>
     </div>
+  );
+}
+
+const FLIGHT_ES: Record<string, string> = {
+  scheduled: "programado", delayed: "demorado", boarding: "embarcando", departed: "despegó", en_route: "en vuelo",
+  approaching: "aproximando", landed: "aterrizó", cancelled: "CANCELADO", diverted: "DESVIADO", unknown: "sin datos",
+};
+const REVIEW_ES: Record<string, string> = {
+  flight_cancelled: "vuelo cancelado", flight_diverted: "vuelo desviado", different_airport: "llega a otro aeropuerto", ambiguous_flight: "vuelo ambiguo (varios)",
+};
+
+function FlightLine({ r }: { r: DispatchRow }) {
+  if (!r.flightCheckedAt) return <div className="text-xs text-ink-500">Sin seguimiento todavía (empieza 24 h antes)</div>;
+  const stale = Date.now() - new Date(r.flightCheckedAt).getTime() > 45 * 60_000;
+  return (
+    <div className="mt-0.5 text-xs">
+      <span className={cx("font-semibold", r.flightStatus === "delayed" ? "text-amber-300" : r.flightStatus === "cancelled" || r.flightStatus === "diverted" ? "text-red-300" : "text-emerald-300")}>
+        {FLIGHT_ES[r.flightStatus ?? "unknown"] ?? r.flightStatus}</span>
+      {r.flightEstimatedArrivalAt && <> · llega {fmtTime(r.flightEstimatedArrivalAt)}{r.flightEstimateKind === "runway_plus_taxi" ? " (pista + rodaje, estimado)" : r.flightEstimateKind === "scheduled" ? " (programado)" : ""}</>}
+      <span className={cx("ml-1", stale ? "text-red-300" : "text-ink-500")}>· {stale ? "datos viejos, " : ""}verificado {fmtTime(r.flightCheckedAt)}</span>
+      {r.flightReviewReason && <div className="font-semibold text-red-300">⚠ Revisar: {REVIEW_ES[r.flightReviewReason] ?? r.flightReviewReason}</div>}
+    </div>
+  );
+}
+
+function PickupProposal({ r, onChanged }: { r: DispatchRow; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [conflict, setConflict] = useState(false);
+  const shift = Math.round((new Date(r.proposedPickupAt!).getTime() - new Date(r.agreedPickupAt).getTime()) / 60000);
+  async function decide(approve: boolean, release = false) {
+    setBusy(true); setMsg(null);
+    try {
+      const res = await backend.decidePickup(r.id, r.version, approve, release);
+      setMsg(approve ? (res.releasedDriver ? "Horario cambiado; el chofer quedó libre y el viaje vuelve a buscar chofer." : "Horario cambiado. Avisamos al pasajero y al chofer.") : "Sugerencia descartada.");
+      setConflict(false); onChanged();
+    } catch (e) {
+      if (e instanceof CommandError && e.code === "driver_conflict") setConflict(true);
+      else setMsg(errText(e));
+    } finally { setBusy(false); }
+  }
+  return (
+    <div className="mt-5 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-sm" data-testid="pickup-proposal">
+      <div className="font-semibold text-amber-200">🕒 Cambio de horario sugerido por el vuelo</div>
+      <p className="mt-1 text-ink-200">
+        {r.flightDesignator} llega {r.flightEstimatedArrivalAt ? fmtTime(r.flightEstimatedArrivalAt) : "—"}. Búsqueda sugerida <b>{fmtTime(r.proposedPickupAt!)}</b>
+        {" "}(acordada {fmtTime(r.agreedPickupAt)}, {shift > 0 ? "+" : ""}{shift} min).
+      </p>
+      {conflict ? (
+        <div className="mt-2 space-y-2">
+          <p className="text-red-200">El chofer tiene otro viaje a ese horario.</p>
+          <div className="flex gap-2">
+            <Button className="py-1.5 text-sm" disabled={busy} onClick={() => decide(true, true)}>Cambiar horario y liberar chofer</Button>
+            <Button variant="outline" className="py-1.5 text-sm" disabled={busy} onClick={() => setConflict(false)}>Volver</Button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-2 flex gap-2">
+          <Button className="py-1.5 text-sm" disabled={busy} onClick={() => decide(true)}>Aprobar y avisar</Button>
+          <Button variant="outline" className="py-1.5 text-sm" disabled={busy} onClick={() => decide(false)}>Descartar</Button>
+        </div>
+      )}
+      {msg && <p className="mt-2 text-xs text-ink-200" role="status">{msg}</p>}
+    </div>
+  );
+}
+
+function PaymentBox({ r, onChanged }: { r: DispatchRow; onChanged: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [amount, setAmount] = useState("");
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  if (!r.paidMinor && !r.paymentReview) return null;
+  const cur = r.paidCurrency ?? r.currency ?? "ARS";
+  const left = r.paidMinor - r.refundedMinor;
+  async function submit() {
+    const minor = Math.round(Number(amount.replace(",", ".")) * 100);
+    setBusy(true); setMsg(null);
+    try { await backend.refund(r.id, minor, reason); setMsg("Reembolso pedido a Mercado Pago."); setOpen(false); setReason(""); onChanged(); }
+    catch (e) { setMsg(errText(e)); }
+    finally { setBusy(false); }
+  }
+  return (
+    <div className="mt-5 rounded-xl border border-ink-700 bg-ink-800/40 p-3 text-sm" data-testid="payment-box">
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wide text-ink-400">Pago Mercado Pago</span>
+        {r.paymentReview && <Badge tone="cancelled">revisar</Badge>}
+      </div>
+      <p className="mt-1">Cobrado <b>{formatMoney(r.paidMinor, cur, "es-AR")}</b>{r.refundedMinor > 0 && <> · reembolsado {formatMoney(r.refundedMinor, cur, "es-AR")}</>}</p>
+      {r.paymentReview && <p className="mt-1 text-xs text-red-200">Hay un pago para conciliar (pago extra, monto distinto o reserva sin chofer/cancelada). Ver alertas.</p>}
+      {left > 0 && !open && <Button variant="outline" className="mt-2 py-1 text-xs" onClick={() => { setOpen(true); setAmount((left / 100).toFixed(2)); }}>Reembolsar…</Button>}
+      {open && (
+        <div className="mt-2 space-y-2">
+          <div className="flex gap-2">
+            <input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" aria-label="Monto a reembolsar"
+              className="w-32 rounded-lg border border-ink-700 bg-ink-950 px-2 py-1 text-white" />
+            <span className="self-center text-xs text-ink-400">{cur} · máx {(left / 100).toFixed(2)}</span>
+          </div>
+          <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Motivo (obligatorio)" aria-label="Motivo"
+            className="w-full rounded-lg border border-ink-700 bg-ink-950 px-2 py-1 text-white" />
+          <div className="flex gap-2">
+            <Button className="py-1 text-xs" disabled={busy || !reason.trim() || !amount} onClick={submit}>Confirmar reembolso</Button>
+            <Button variant="outline" className="py-1 text-xs" onClick={() => setOpen(false)}>Cancelar</Button>
+          </div>
+        </div>
+      )}
+      {msg && <p className="mt-2 text-xs text-ink-200" role="status">{msg}</p>}
+    </div>
+  );
+}
+
+function PaymentSettingsButton() {
+  const [open, setOpen] = useState(false);
+  const [currency, setCurrency] = useState("ARS");
+  const [usd, setUsd] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    backend.paymentSettings().then((p) => { setCurrency(p.currency); setUsd(p.fx.USD ? String(p.fx.USD) : ""); }).catch(() => {});
+  }, [open]);
+  return (
+    <>
+      <button onClick={() => setOpen(true)} className="text-ink-300 hover:text-white">Cobros</button>
+      {open && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/60" onClick={() => setOpen(false)} role="dialog" aria-modal="true" aria-label="Cobros">
+          <div className="w-full max-w-sm rounded-2xl border border-ink-700 bg-ink-900 p-5 text-sm" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-lg font-semibold">Cobros con Mercado Pago</h2>
+            <p className="mt-1 text-xs text-ink-400">Mercado Pago Argentina cobra en pesos. Las tarifas en dólares se convierten con este tipo de cambio al generar el link de pago (queda fijo en ese link).</p>
+            <label className="mt-4 block text-xs text-ink-400">Moneda de cobro
+              <input value={currency} onChange={(e) => setCurrency(e.target.value.toUpperCase().slice(0, 3))} className="mt-1 w-full rounded-lg border border-ink-700 bg-ink-950 px-2 py-1.5 font-mono text-white" /></label>
+            <label className="mt-3 block text-xs text-ink-400">Pesos por 1 USD
+              <input value={usd} onChange={(e) => setUsd(e.target.value)} inputMode="decimal" placeholder="ej. 1180" className="mt-1 w-full rounded-lg border border-ink-700 bg-ink-950 px-2 py-1.5 text-white" /></label>
+            <div className="mt-4 flex gap-2">
+              <Button className="py-1.5 text-sm" onClick={async () => {
+                setMsg(null);
+                try { await backend.setPaymentSettings(currency, usd ? { USD: Number(usd.replace(",", ".")) } : {}); setMsg("Guardado."); }
+                catch (e) { setMsg(errText(e)); }
+              }}>Guardar</Button>
+              <Button variant="outline" className="py-1.5 text-sm" onClick={() => setOpen(false)}>Cerrar</Button>
+            </div>
+            {msg && <p className="mt-2 text-xs text-ink-200">{msg}</p>}
+            <p className="mt-3 text-[11px] text-ink-500">Solo administración y finanzas pueden cambiarlo.</p>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

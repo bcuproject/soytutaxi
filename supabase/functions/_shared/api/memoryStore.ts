@@ -114,6 +114,15 @@ export interface DispatchRow {
   deskHold: boolean;
   deskReleasedAt: string | null;
   deskMethod: "auto" | "board" | "manual" | null;
+  flightStatus: string | null;
+  flightEstimatedArrivalAt: string | null;
+  flightEstimateKind: "gate" | "runway_plus_taxi" | "scheduled" | null;
+  flightCheckedAt: string | null;
+  flightReviewReason: string | null;
+  paidMinor: number;
+  paidCurrency: string | null;
+  refundedMinor: number;
+  paymentReview: boolean;
 }
 
 let seq = 0;
@@ -243,6 +252,9 @@ export class MemoryStore implements Store {
         onBoard: b.state === "needs_driver" && new Date(b.journey.pickupAt).getTime() > this.clock().getTime() + 12 * 3600_000,
         claimSource: s ? ("staff" as const) : null, openOffers: 0,
         deskHold: false, deskReleasedAt: null, deskMethod: null,
+        flightStatus: null, flightEstimatedArrivalAt: null, flightEstimateKind: null, flightCheckedAt: null, flightReviewReason: null,
+        paidMinor: b.collectionState === "collected" && b.amountMinor ? b.amountMinor : 0, paidCurrency: b.collectionState === "collected" ? b.currency : null,
+        refundedMinor: 0, paymentReview: false,
       };
     }).sort((a, b) => a.agreedPickupAt.localeCompare(b.agreedPickupAt));
   }

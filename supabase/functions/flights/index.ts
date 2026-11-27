@@ -1,10 +1,11 @@
 // Supabase Edge Function `flights` (deploy with --no-verify-jwt; callers send their Supabase access token).
 //   GET /flights/board?airport=EZE|AEP&dir=arr|dep   airport arrivals/departures board (drivers and staff)
 //   GET /flights/mine                                live status of the signed-in driver's airport pickups
+//   POST /flights/track                              flight tracking pass (pg_cron, x-outbox-key): proposes pickups
 // Secrets: FLIGHTS_API_KEY (AeroDataBox) and FLIGHTS_PROVIDER = "apimarket" (default) | "rapidapi".
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { aeroDataBox } from "../_shared/flights/aerodatabox.ts";
-import { board, myFlights, type DriverFlightJob, type FlightCacheDb } from "../_shared/flights/service.ts";
+import { board, myFlights, trackFlights, type DriverFlightJob, type FlightCacheDb, type TrackTarget } from "../_shared/flights/service.ts";
 
 function serviceKey(): string {
   const legacy = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
@@ -24,7 +25,7 @@ const provider = KEY ? aeroDataBox({ key: KEY, via: Deno.env.get("FLIGHTS_PROVID
 const CORS = {
   "access-control-allow-origin": Deno.env.get("ALLOWED_ORIGINS") ?? "*",
   "access-control-allow-headers": "authorization, content-type, apikey, x-client-info",
-  "access-control-allow-methods": "GET, OPTIONS",
+  "access-control-allow-methods": "GET, POST, OPTIONS",
 };
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { ...CORS, "content-type": "application/json" } });
 
@@ -40,8 +41,22 @@ const cache: FlightCacheDb = {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
-  if (req.method !== "GET") return json(405, { error: { code: "method_not_allowed" } });
   const url = new URL(req.url);
+  if (req.method === "POST" && url.pathname.endsWith("/track")) {
+    const { data: ok } = await db.rpc("wa_outbox_key_ok", { p_key: req.headers.get("x-outbox-key") ?? "" });
+    if (!ok) return json(401, { error: { code: "unauthenticated" } });
+    const { data: targets, error } = await db.rpc("flight_tracking_targets");
+    if (error) return json(500, { error: { code: "internal" } });
+    const r = await trackFlights(cache, provider, (targets ?? []) as TrackTarget[], async (id, status, arrival, kind, airport, ambiguous) => {
+      const { data, error: e } = await db.rpc("flight_tracking_apply", { p_booking: id, p_status: status, p_arrival: arrival, p_kind: kind,
+        p_arrival_airport: airport, p_ambiguous: ambiguous });
+      if (e) throw new Error(e.message);
+      return data as { outcome: string };
+    }, new Date());
+    if (r.checked || r.failed) console.log(JSON.stringify({ fn: "flights", track: r }));
+    return json(200, r);
+  }
+  if (req.method !== "GET") return json(405, { error: { code: "method_not_allowed" } });
 
   const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.get("authorization") ?? "")?.[1];
   if (!bearer) return json(401, { error: { code: "unauthenticated" } });

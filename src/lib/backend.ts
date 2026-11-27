@@ -118,6 +118,12 @@ export interface Backend {
   setCallMode(mode: CallMode, voiceId?: string | null): Promise<void>;
   callbackDone(callId: string): Promise<void>;
   flightBoard(airport: "EZE" | "AEP", dir: "arr" | "dep"): Promise<FlightBoard>;
+  decidePickup(bookingId: string, version: number, approve: boolean, releaseOnConflict?: boolean): Promise<{ releasedDriver?: boolean }>;
+  refund(bookingId: string, amountMinor: number, reason: string): Promise<void>;
+  paymentSettings(): Promise<{ currency: string; fx: Record<string, number> }>;
+  setPaymentSettings(currency: string, fx: Record<string, number>): Promise<void>;
+  /** Passenger status page: Mercado Pago checkout URL for this booking. */
+  payCheckout(reference: string, token: string): Promise<string>;
   myFlights(): Promise<{ flights: MyFlight[]; configured: boolean }>;
   /** Demo only: make a fake WhatsApp call ring. */
   simulateCall?(): void;
@@ -220,7 +226,7 @@ class DemoBackend implements Backend {
     }));
   }
   async dispatchRows(fromIso: string, toIso: string) {
-    return this.store.dispatchRows().filter((r) => r.agreedPickupAt >= fromIso && r.agreedPickupAt < toIso);
+    return this.store.dispatchRows().filter((r) => r.agreedPickupAt >= fromIso && r.agreedPickupAt < toIso).map(demoFlight);
   }
   async tripEvents(id: string) {
     return this.store.eventsFor(id);
@@ -353,6 +359,11 @@ class DemoBackend implements Backend {
     return { airport, direction: dir, fetchedAt: new Date().toISOString(), stale: false, flights: demoFlights(airport, dir) };
   }
   async myFlights() { return { flights: [] as MyFlight[], configured: true }; }
+  async decidePickup(): Promise<{ releasedDriver?: boolean }> { throw LIVE_ONLY(); }
+  async refund(): Promise<void> { throw LIVE_ONLY(); }
+  async paymentSettings() { return { currency: "ARS", fx: { USD: 1200 } }; }
+  async setPaymentSettings(): Promise<void> { throw LIVE_ONLY(); }
+  async payCheckout(): Promise<string> { throw new CommandError("payments_not_configured"); }
   private listeners = new Set<(t: string) => void>();
   private notify(t: string) { for (const l of this.listeners) l(t); }
 
@@ -369,6 +380,15 @@ class DemoBackend implements Backend {
     (this.wa.msgs[id] ??= []).push({ id: `m${Date.now()}`, direction: "out", kind: "text", preview: text, status: "sent", error: null, staff: true, at });
     Object.assign(c, { lastPreview: text, lastDirection: "out", lastAt: at });
   }
+}
+
+/** Demo flight tracking: STT-DEM001's flight is late (pickup change waiting for approval), STT-DEM004 is on time. */
+function demoFlight(r: DispatchRow): DispatchRow {
+  const at = (min: number) => new Date(new Date(r.agreedPickupAt).getTime() + min * 60_000).toISOString();
+  const checked = new Date(Date.now() - 4 * 60_000).toISOString();
+  if (r.reference === "STT-DEM001") return { ...r, flightStatus: "delayed", flightEstimatedArrivalAt: at(-15), flightEstimateKind: "gate", flightCheckedAt: checked, proposedPickupAt: at(45) };
+  if (r.reference === "STT-DEM004") return { ...r, flightStatus: "en_route", flightEstimatedArrivalAt: at(-60), flightEstimateKind: "gate", flightCheckedAt: checked };
+  return r;
 }
 
 /** Demo airport board: plausible flights around now (not real data). */
@@ -629,6 +649,23 @@ class SupabaseBackend implements Backend {
     return body as T;
   }
   async flightBoard(airport: "EZE" | "AEP", dir: "arr" | "dep") { return this.flightsGet<FlightBoard>(`/board?airport=${airport}&dir=${dir}`); }
+  async decidePickup(bookingId: string, version: number, approve: boolean, releaseOnConflict = false) {
+    return this.rpc<{ releasedDriver?: boolean }>("dispatch_pickup_decide", { p_booking: bookingId, p_expected_version: version, p_approve: approve, p_release_on_conflict: releaseOnConflict });
+  }
+  async refund(bookingId: string, amountMinor: number, reason: string) { await this.rpc("dispatch_refund", { p_booking: bookingId, p_amount_minor: amountMinor, p_reason: reason }); }
+  async paymentSettings() {
+    const { data } = await this.sb.from("payment_settings").select("charge_currency, fx_rates").maybeSingle();
+    return { currency: (data?.charge_currency as string) ?? "ARS", fx: (data?.fx_rates as Record<string, number>) ?? {} };
+  }
+  async setPaymentSettings(currency: string, fx: Record<string, number>) { await this.rpc("admin_set_payment_settings", { p_currency: currency, p_fx: fx }); }
+  async payCheckout(reference: string, token: string) {
+    const res = await fetch(`${this.url}/functions/v1/payments/checkout`, {
+      method: "POST", headers: { apikey: this.anonKey, "content-type": "application/json" }, body: JSON.stringify({ reference, token }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new CommandError(body?.error?.code ?? "payment_error");
+    return String(body.url);
+  }
   async myFlights() { return this.flightsGet<{ flights: MyFlight[]; configured: boolean }>("/mine"); }
   async radioToken() {
     const { data } = await this.sb.auth.getSession();

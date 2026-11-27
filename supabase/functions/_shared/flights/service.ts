@@ -72,3 +72,46 @@ export async function myFlights(db: FlightCacheDb, provider: FlightProvider | nu
   }
   return out;
 }
+
+// ------------------------------------------------------------------------------------------ tracking
+export interface TrackTarget { booking_id: string; flight: string; local_date: string; airport: string; agreed_pickup_at: string; checked_at: string | null; interval_minutes: number }
+export interface TrackApply {
+  (bookingId: string, status: string, arrival: string | null, kind: "gate" | "runway_plus_taxi" | "scheduled", arrivalAirport: string | null, ambiguous: boolean): Promise<{ outcome: string }>;
+}
+
+/**
+ * One pass of flight tracking (pg_cron every 5 min). Each flight instance is fetched once for all its bookings,
+ * honouring the policy interval; provider failures keep the agreed pickup and just leave flight_checked_at stale.
+ */
+export async function trackFlights(db: FlightCacheDb, provider: FlightProvider | null, targets: TrackTarget[], apply: TrackApply, now: Date) {
+  const out = { checked: 0, proposed: 0, review: 0, failed: 0 };
+  if (!provider) return out;
+  const groups = new Map<string, TrackTarget[]>();
+  for (const t of targets) {
+    if (t.checked_at && now.getTime() - new Date(t.checked_at).getTime() < (t.interval_minutes - 1) * 60_000) continue;
+    const k = `${t.flight}|${t.local_date}`;
+    groups.set(k, [...(groups.get(k) ?? []), t]);
+  }
+  for (const [k, list] of groups) {
+    const [flight, date] = k.split("|");
+    let legs: FlightInfo[];
+    try {
+      const r = await cached(db, `flight:${flight}:${date}`, now, Math.max(60, (list[0].interval_minutes - 1) * 60), () => provider.flight(flight, date));
+      if (r.stale) { out.failed++; continue; }
+      legs = r.value as FlightInfo[];
+    } catch { out.failed++; continue; }
+    for (const t of list) {
+      const toUs = legs.filter((l) => l.airport === t.airport);
+      const leg = toUs[0] ?? legs[legs.length - 1];
+      if (!leg) continue;                                    // not in provider data yet: keep scheduled
+      const ambiguous = toUs.length > 1 && new Set(toUs.map((l) => l.scheduled)).size > 1;
+      const kind = leg.actual ? "runway_plus_taxi" : leg.estimated ? "gate" : "scheduled";
+      const arrival = leg.actual ?? leg.estimated ?? leg.scheduled;
+      const r = await apply(t.booking_id, leg.status, arrival, kind, toUs.length ? t.airport : leg.airport || null, ambiguous);
+      out.checked++;
+      if (r.outcome === "proposed") out.proposed++;
+      if (r.outcome === "review") out.review++;
+    }
+  }
+  return out;
+}

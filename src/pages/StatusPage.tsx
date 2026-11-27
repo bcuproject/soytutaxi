@@ -17,10 +17,20 @@ export default function StatusPage() {
   const cfg = useConfig();
   const [view, setView] = useState<BookingStatusView | null | "missing">(null);
 
+  const [tick, setTick] = useState(0);
   useEffect(() => {
     backend.api<BookingStatusView>("GET", `/bookings/${encodeURIComponent(ref)}`, undefined, { "x-status-token": sp.get("t") ?? "" })
-      .then(setView).catch(() => setView("missing"));
-  }, [ref, sp]);
+      .then(setView).catch(() => setView((v) => (v && v !== "missing" ? v : "missing")));
+  }, [ref, sp, tick]);
+  // Back from Mercado Pago (?pago=1): the payment is confirmed by Mercado Pago's server notification,
+  // never by this page, so re-read the status for a minute until it shows as paid.
+  const returned = sp.get("pago") === "1";
+  useEffect(() => {
+    if (!returned) return;
+    let n = 0;
+    const i = setInterval(() => { n++; setTick((x) => x + 1); if (n >= 12) clearInterval(i); }, 5000);
+    return () => clearInterval(i);
+  }, [returned]);
 
   if (view === null) return <div className="py-24 text-center text-ink-400">…</div>;
   if (view === "missing") {
@@ -70,6 +80,7 @@ export default function StatusPage() {
           <span className="text-ink-300">{t(`pay.${view.paymentMode}`)}</span>
           {view.amountMinor !== null && <span className="font-semibold tabular-nums">{formatMoney(view.amountMinor, view.currency!, locale)}</span>}
         </div>
+        <PayNow view={view} token={sp.get("t") ?? ""} returned={returned} locale={locale} />
 
         {view.direction === "from_airport" && (
           <div className="mt-4 rounded-xl border border-ink-700 p-4 text-sm">
@@ -83,6 +94,39 @@ export default function StatusPage() {
             className="mt-6 block text-center text-sm text-cab-400 hover:text-cab-500">{t("status.help")} →</a>
         )}
       </div>
+    </div>
+  );
+}
+
+function PayNow({ view, token, returned, locale }: { view: BookingStatusView; token: string; returned: boolean; locale: string }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const en = locale === "en";
+  if (view.paymentMode !== "prepaid") return null;
+  if (view.collectionState === "collected") {
+    return <p className="mt-3 rounded-xl bg-emerald-500/10 px-4 py-2 text-sm text-emerald-300" data-testid="paid">{en ? "✓ Paid" : "✓ Pagado"}</p>;
+  }
+  if (view.bookingState !== "held") return null;     // pay once a driver is reserved
+  const ERR: Record<string, [string, string]> = {
+    payments_not_configured: ["El pago online todavía no está disponible. Te contactamos por WhatsApp.", "Online payment isn't available yet. We'll contact you on WhatsApp."],
+    fx_rate_missing: ["El pago online todavía no está disponible. Te contactamos por WhatsApp.", "Online payment isn't available yet. We'll contact you on WhatsApp."],
+    already_paid: ["Este viaje ya está pagado.", "This trip is already paid."],
+  };
+  return (
+    <div className="mt-3 rounded-xl border border-cab-500/40 bg-cab-500/10 p-4 text-sm" data-testid="pay-now">
+      {returned ? (
+        <p className="text-ink-200">{en ? "Checking your payment with Mercado Pago… this page updates by itself." : "Estamos verificando tu pago con Mercado Pago… esta página se actualiza sola."}</p>
+      ) : (
+        <p className="text-ink-200">{en ? "A driver is reserved for you. Pay now to confirm the trip." : "Tenés un chofer reservado. Pagá ahora para confirmar el viaje."}</p>
+      )}
+      <button disabled={busy} onClick={async () => {
+        setBusy(true); setErr(null);
+        try { window.location.assign(await backend.payCheckout(view.reference, token)); }
+        catch (e) { const c = (e as { code?: string }).code ?? "error"; setErr((ERR[c] ?? ["No pudimos abrir el pago. Probá de nuevo.", "We couldn't open the payment. Please try again."])[en ? 1 : 0]); setBusy(false); }
+      }} className="mt-3 w-full rounded-xl bg-sky-500 px-4 py-3 font-semibold text-white hover:bg-sky-400 disabled:opacity-50">
+        {busy ? "…" : en ? "Pay with Mercado Pago" : "Pagar con Mercado Pago"}
+      </button>
+      {err && <p className="mt-2 text-xs text-red-300" role="alert">{err}</p>}
     </div>
   );
 }

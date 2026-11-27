@@ -8,9 +8,14 @@ const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
 page.on("console", (m) => m.type() === "error" && !/tile\.openstreetmap|ERR_|Failed to load resource/.test(m.text() + (m.location()?.url ?? "")) && errors.push(m.text()));
 const assert = (c, msg) => { if (!c) throw new Error("ASSERT: " + msg); console.log("ok -", msg); };
+// Find and click in one step inside the page: a handle found before a re-render can go stale.
 const clickText = async (sel, text) => {
-  const h = await page.waitForFunction((s, t) => [...document.querySelectorAll(s)].find((e) => e.textContent.includes(t)), {}, sel, text);
-  await h.asElement().click();
+  await page.waitForFunction((s, t) => {
+    const el = [...document.querySelectorAll(s)].find((e) => e.textContent.includes(t) && e.isConnected && !e.disabled);
+    if (!el) return false;
+    el.click();
+    return true;
+  }, {}, sel, text);
 };
 
 await page.setViewport({ width: 1280, height: 900 });
@@ -94,6 +99,17 @@ await page.screenshot({ path: `${SHOTS}/7-whatsapp.png` });
 await clickText("button", "Devolver al bot");
 await clickText('[role="tab"]', "Agenda");
 
+// Flight tracking: STT-DEM001's flight is late → suggested pickup in the drawer
+await page.evaluate(() => { const b = [...document.querySelectorAll("button")].find((x) => x.innerText.trim() === "Mañana"); b && b.click(); });
+await page.waitForFunction(() => document.body.innerText.includes("STT-DEM001"));
+await clickText('[role="tab"]', "Reservas");
+await clickText("tr, button, [role=button]", "STT-DEM001");
+await page.waitForSelector('[data-testid="pickup-proposal"]');
+assert(await page.$eval('[data-testid="pickup-proposal"]', (e) => e.innerText.includes("+45 min") && e.innerText.includes("Aprobar")), "suggested pickup from a late flight, waiting for approval");
+await page.screenshot({ path: `${SHOTS}/14-pickup-proposal.png` });
+await page.keyboard.press("Escape");
+await clickText('[role="tab"]', "Agenda");
+
 // Airport timetable (same panel as the driver app's Vuelos tab)
 await clickText('[role="tab"]', "Vuelos");
 await page.waitForSelector('[data-testid="flight-board"] li');
@@ -136,7 +152,10 @@ const deskRef = await page.$eval('[data-testid="booking-ref"]', (e) => e.textCon
 await page.screenshot({ path: `${SHOTS}/9-call-booking.png` });
 await clickText("button", "Colgar");
 await clickText('[role="tab"]', "Entrantes");
-await page.waitForSelector(`[data-testid="desk-${deskRef}"]`);
+await page.waitForSelector(`[data-testid="desk-${deskRef}"]`, { timeout: 8000 }).catch(async (e) => {
+  console.log("DEBUG", deskRef, (await page.evaluate(() => document.body.innerText)).slice(0, 2500));
+  throw e;
+});
 assert(true, `phone booking ${deskRef} waits at the desk in manual mode`);
 await page.screenshot({ path: `${SHOTS}/10-desk-queue.png` });
 await page.click(`[data-testid="desk-${deskRef}"] [data-testid="send-board"]`);

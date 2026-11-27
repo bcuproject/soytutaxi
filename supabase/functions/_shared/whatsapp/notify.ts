@@ -70,6 +70,37 @@ export async function composeNotification(
       }
       break;
     }
+    case "notify.passenger.payment_due":
+    case "notify.passenger.pickup_changed":
+    case "notify.passenger.refund": {
+      locale = ctx.passenger.locale === "en" ? "en" : "es-AR";
+      to = digits(ctx.passenger.phone); lastInbound = ctx.passenger.lastInboundAt;
+      const token = await deriveStatusToken(opts.statusTokenSecret, ctx.operatorId, ctx.idempotencyKey);
+      const url = `${app}/reserva/${ctx.reference}?t=${token}`;
+      if (kind.endsWith("payment_due")) {
+        if (ctx.state !== "held") return { send: false, reason: "state_changed", final: true };
+        const price = ctx.amountMinor !== null && ctx.currency ? formatMoney(ctx.amountMinor, ctx.currency, locale) : "";
+        message = { type: "text", text: say(locale, "nPayDue", { ref: ctx.reference, route: route(locale), when: when(ctx.pickupAt, locale), price, url }) };
+        params = [ctx.reference, when(ctx.pickupAt, locale), price, url];
+      } else if (kind.endsWith("pickup_changed")) {
+        if (ctx.state === "cancelled" || ctx.state === "closed") return { send: false, reason: "state_changed", final: true };
+        message = { type: "text", text: say(locale, "nPickupChanged", { ref: ctx.reference, when: when(ctx.pickupAt, locale), url }) };
+        params = [ctx.reference, when(ctx.pickupAt, locale), url];
+      } else {
+        message = { type: "text", text: say(locale, "nRefund", { ref: ctx.reference }) };
+        params = [ctx.reference];
+      }
+      break;
+    }
+    case "notify.driver.pickup_changed": {
+      const d = ctx.driver;
+      if (!d) return { send: false, reason: "no_driver", final: true };
+      if (!d.verified) return { send: false, reason: "driver_whatsapp_unverified", final: true };
+      to = digits(d.phone); lastInbound = d.lastInboundAt;
+      message = { type: "text", text: say(locale, "nDriverPickupChanged", { ref: ctx.reference, when: when(ctx.pickupAt, locale), flight: ctx.flight ?? "" }) };
+      params = [ctx.reference, when(ctx.pickupAt, locale)];
+      break;
+    }
     case "notify.driver.offer": {
       const o = ctx.offer;
       if (!o) return { send: false, reason: "offer_not_found", final: true };

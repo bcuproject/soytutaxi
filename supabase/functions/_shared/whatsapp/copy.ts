@@ -3,6 +3,10 @@ import type { Locale } from "../domain/types.ts";
 
 const es = {
   welcome: "¡Hola{name}! 🚕 Soy el asistente de *SoyTuTaxi*. Reservo traslados entre Ezeiza o Aeroparque y la ciudad, con tarifa fija.\n\nPodés escribirme todo junto, por ejemplo: _\"Llego a Ezeiza mañana 10:30 en AR1303, voy a Palermo, somos 2 con 2 valijas\"_.",
+  nPayDue: "🚕 *¡Tenemos chofer para {ref}!*\n\n{route}\n🗓️ {when}\n\nPara confirmarlo, pagá *{price}* con Mercado Pago (el chofer queda reservado unos minutos):\n{url}",
+  nPickupChanged: "🕒 *Cambió el horario de búsqueda de {ref}*\n\nSegún tu vuelo, ahora te buscamos el {when}.\n\nDetalle: {url}",
+  nDriverPickupChanged: "🕒 *{ref}*: nueva hora de búsqueda {when} (vuelo {flight}).",
+  nRefund: "💸 Procesamos el reembolso de tu reserva *{ref}*. Puede tardar unos días hábiles en verse en tu medio de pago.",
   nConfirmed: "✅ *Tu viaje {ref} está confirmado*\n\n{route}\n🗓️ {when}\n🚘 {driver} · {vehicle} · {plate}\n\nVer estado: {url}",
   nCancelled: "❌ Tu reserva *{ref}* fue cancelada. Si es un error, respondé este mensaje y te ayudamos.",
   nOffer: "🚕 *Nueva oferta {ref}*\n{route}\n🗓️ {when}\n👥 {pax} · 🧳 {bags}\n💰 Ganás *{earn}*\n⏳ Respondé antes de las {expires}",
@@ -72,6 +76,10 @@ type Copy = typeof es;
 
 const en: Copy = {
   welcome: "Hi{name}! 🚕 I'm the *SoyTuTaxi* assistant. I book fixed-fare transfers between Ezeiza or Aeroparque and the city.\n\nYou can send everything at once, e.g. _\"Landing at Ezeiza tomorrow 10:30 on AR1303, going to Palermo, 2 people with 2 suitcases\"_.",
+  nPayDue: "🚕 *We have a driver for {ref}!*\n\n{route}\n🗓️ {when}\n\nTo confirm, pay *{price}* with Mercado Pago (the driver is held for a few minutes):\n{url}",
+  nPickupChanged: "🕒 *Pickup time changed for {ref}*\n\nBased on your flight, we'll now meet you on {when}.\n\nDetails: {url}",
+  nDriverPickupChanged: "🕒 *{ref}*: new pickup time {when} (flight {flight}).",
+  nRefund: "💸 We've processed the refund for your booking *{ref}*. It can take a few business days to show on your payment method.",
   nConfirmed: "✅ *Your trip {ref} is confirmed*\n\n{route}\n🗓️ {when}\n🚘 {driver} · {vehicle} · {plate}\n\nStatus: {url}",
   nCancelled: "❌ Your booking *{ref}* was cancelled. If that's a mistake, reply here and we'll help.",
   nOffer: "🚕 *New offer {ref}*\n{route}\n🗓️ {when}\n👥 {pax} · 🧳 {bags}\n💰 You earn *{earn}*\n⏳ Reply before {expires}",

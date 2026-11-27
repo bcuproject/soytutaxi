@@ -63,6 +63,18 @@ This release is the dispatch backend and web front end for Buenos Aires transfer
 - Data: AeroDataBox (`supabase/functions/_shared/flights/aerodatabox.ts`; swap this one file to change provider), through the `flights` Edge Function (drivers and staff only). A shared cache (`flight_cache`) means each board is fetched at most every 5 min, and each flight every 3 min near landing (30 min otherwise), however many drivers are looking. If the provider is down, the last copy is shown and marked as not updated.
 - Secrets: `FLIGHTS_API_KEY` and `FLIGHTS_PROVIDER` (`apimarket`, the default, or `rapidapi`). Without a key, the tab explains that the provider isn't connected.
 
+## Flight-based pickup changes and Mercado Pago (Phase 4)
+
+- **Flight tracking.** Every 5 min, pg_cron calls `/flights/track`. Arrivals inside the monitoring window (24 h) are checked once per flight per policy interval.
+  - **New pickup time:** estimated gate time (or runway time plus the taxi allowance, labelled as an estimate) plus the airport buffer gives a **suggested pickup**. Small changes under the threshold are ignored. `agreed_pickup_at` doesn't change until dispatch presses **Aprobar y avisar**. That moves the driver's slot too, or reports a clash and offers to release the driver. It supersedes open offers and notifies the passenger and the driver once.
+  - **Review cases:** a cancelled flight, a diversion, a different arrival airport or an ambiguous flight raises a critical "revisar vuelo" alert and never moves the pickup.
+  - **Provider failure:** the agreed time is kept, and "verificado hh:mm" shows how old the data is.
+- **Payments.** When a driver reserves a prepaid trip (held), the passenger gets a WhatsApp message and a **Pagar con Mercado Pago** button on their status page. Checkout Pro is created server-side for the locked amount, converted to pesos with **Despacho → Cobros**, and expires with the hold.
+  - **Confirmation:** only a notification whose `x-signature` checks out, followed by fetching the payment from Mercado Pago (reference, amount, currency and merchant checked), can confirm the trip. The return page just waits.
+  - **Reconciliation:** duplicates are ignored, and "approved" never goes back to "pending". Late payments (hold expired), payments on cancelled bookings, extra payments and mismatched amounts are kept and go to reconciliation alerts.
+  - **Refunds:** stored first, then sent once with an idempotency key and confirmed with Mercado Pago. The passenger is notified.
+- Secrets (`payments` function): `MP_ACCESS_TOKEN` (`TEST-…` for sandbox), `MP_WEBHOOK_SECRET`, optional `MP_COLLECTOR_ID`. Set the policy's `payments_enabled` to true when going live.
+
 ## Live staging (26 Nov 2026)
 
 - Supabase project `soytutaxi` (ref `sxjhtsyguacfyixaeydz`, São Paulo). Migrations and demo data applied, `api` Edge Function deployed (`verify_jwt = false`).
