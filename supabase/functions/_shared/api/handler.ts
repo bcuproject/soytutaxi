@@ -86,7 +86,7 @@ async function optionalActor(req: Request, ctx: HandlerContext, cfg: OperatorCon
 }
 
 function isDispatcher(actor: Actor | null): boolean {
-  return !!actor && actor.roles.some((r) => r === "admin" || r === "dispatcher");
+  return !!actor && actor.roles.some((r) => r === "admin" || r === "dispatcher" || r === "agent");   // booking-desk agents take bookings too
 }
 
 async function loadCfg(ctx: HandlerContext): Promise<OperatorConfig> {

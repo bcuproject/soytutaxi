@@ -33,9 +33,9 @@ function Rich({ text }: { text: string }) {
 
 const TICK: Record<string, string> = { queued: "🕓", sent: "✓", delivered: "✓✓", read: "✓✓", failed: "⚠️" };
 
-export function WhatsAppInbox({ onOpenBooking, onCount }: { onOpenBooking: (ref: string) => void; onCount?: (n: number) => void }) {
+export function WhatsAppInbox({ onOpenBooking, onCount, initialConversationId }: { onOpenBooking: (ref: string) => void; onCount?: (n: number) => void; initialConversationId?: string | null }) {
   const [convs, setConvs] = useState<WaConversation[]>([]);
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useState<string | null>(initialConversationId ?? null);
   const [msgs, setMsgs] = useState<WaMessage[]>([]);
   const [filter, setFilter] = useState<"all" | "staff" | "passenger" | "driver">("all");
   const [text, setText] = useState("");

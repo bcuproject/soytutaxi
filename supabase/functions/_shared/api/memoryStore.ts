@@ -111,6 +111,9 @@ export interface DispatchRow {
   onBoard: boolean;
   claimSource: "staff" | "offer" | "board" | null;
   openOffers: number;
+  deskHold: boolean;
+  deskReleasedAt: string | null;
+  deskMethod: "auto" | "board" | "manual" | null;
 }
 
 let seq = 0;
@@ -239,6 +242,7 @@ export class MemoryStore implements Store {
         // Demo approximation of app.on_board(): needs a driver and pickup more than 12 h away.
         onBoard: b.state === "needs_driver" && new Date(b.journey.pickupAt).getTime() > this.clock().getTime() + 12 * 3600_000,
         claimSource: s ? ("staff" as const) : null, openOffers: 0,
+        deskHold: false, deskReleasedAt: null, deskMethod: null,
       };
     }).sort((a, b) => a.agreedPickupAt.localeCompare(b.agreedPickupAt));
   }

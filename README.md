@@ -44,6 +44,12 @@ This release is the dispatch backend and web front end for Buenos Aires transfer
 - **Security:** the webhook checks `X-Hub-Signature-256` with `WHATSAPP_APP_SECRET`. Each message is processed once (inbox de-duplication). Conversation state uses optimistic locking. All `wa_*` functions are callable by the service role only.
 - **Setup:** see [docs/WHATSAPP_SETUP.md](docs/WHATSAPP_SETUP.md) (Meta test number, secrets, webhook URL).
 
+## Central de reservas (booking desk) and WhatsApp calls
+
+- **`/central`** is a separate screen for call and chat takers (new `agent` role; dispatchers and admins can use it too). It has four tabs: **Entrantes** (bookings waiting at the desk, plus everything received in the last 48 h from any channel), **WhatsApp** (the chat inbox), **Llamadas** (call log with missed calls) and **+ Nueva reserva** (the staff booking form).
+- **Auto / Manual switch:** in Auto, new bookings go straight to dispatch. In Manual, they get `desk_hold`. They stay off the job board, out of automatic escalation and hidden in Despacho until an agent sends them as **Automático** (nearest-first offers now), **Bolsa** (job board) or **Manual** (dispatcher assigns). See `desk_release`.
+- **WhatsApp voice calls** (Cloud API Calling) ring in the browser. Meta's WebRTC offer is stored on `wa_calls`. The agent's browser builds the answer, and `/whatsapp/call-action` claims the call atomically (one agent wins) and sends `pre_accept` + `accept` to Meta. Audio goes browser ↔ WhatsApp directly. During a call, **+ Reserva para este cliente** opens the booking form prefilled with the caller's name and number. The booking is recorded as channel `phone` and linked to the call.
+
 ## Live staging (26 Nov 2026)
 
 - Supabase project `soytutaxi` (ref `sxjhtsyguacfyixaeydz`, São Paulo). Migrations and demo data applied, `api` Edge Function deployed (`verify_jwt = false`).

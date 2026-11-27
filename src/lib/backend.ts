@@ -38,6 +38,14 @@ export interface WaMessage {
   id: string; direction: "in" | "out"; kind: string; preview: string; status: string; error: string | null; staff: boolean; at: string;
 }
 
+export type DeskMode = "auto" | "manual";
+export type DeskMethod = "auto" | "board" | "manual";
+export interface WaCall {
+  id: string; status: "ringing" | "answering" | "active" | "ended" | "missed" | "rejected" | "failed";
+  phone: string; waId: string; name: string | null; offerSdp: string | null; answeredBy: string | null; answeredByMe: boolean;
+  startedAt: string; connectedAt: string | null; endedAt: string | null; durationS: number | null; bookingRef: string | null; conversationId: string | null;
+}
+
 export interface Backend {
   mode: "demo" | "live";
   api<T>(method: "GET" | "POST", path: string, body?: unknown, headers?: Record<string, string>): Promise<T>;
@@ -81,6 +89,19 @@ export interface Backend {
   waMessages(conversationId: string): Promise<WaMessage[]>;
   waTakeover(conversationId: string, take: boolean): Promise<void>;
   waSend(conversationId: string, text: string): Promise<void>;
+
+  // --- Booking desk (Central de reservas) ---------------------------------------------------------
+  deskMode(): Promise<DeskMode>;
+  setDeskMode(mode: DeskMode): Promise<void>;
+  /** Bookings waiting at the desk plus everything received in the last 48 h (any pickup date). */
+  deskRows(): Promise<DispatchRow[]>;
+  deskRelease(bookingId: string, version: number, method: DeskMethod): Promise<{ note?: string | null }>;
+  callerHistory(phone: string): Promise<DispatchRow[]>;
+  waCalls(): Promise<WaCall[]>;
+  callAction(callId: string, action: "accept" | "reject" | "terminate", sdp?: string): Promise<void>;
+  linkCallBooking(callId: string, reference: string): Promise<void>;
+  /** Demo only: make a fake WhatsApp call ring. */
+  simulateCall?(): void;
 }
 
 export interface BoardRow {
@@ -234,7 +255,8 @@ class DemoBackend implements Backend {
   async cancel(): Promise<void> { throw LIVE_ONLY(); }
   subscribe(onChange: (t: string) => void) {
     const i = setInterval(() => onChange("driver_locations"), 3000);
-    return () => clearInterval(i);
+    this.listeners.add(onChange);
+    return () => { clearInterval(i); this.listeners.delete(onChange); };
   }
   async driverMe(): Promise<DriverMe> { throw LIVE_ONLY(); }
   async setShift(): Promise<void> { throw LIVE_ONLY(); }
@@ -248,6 +270,53 @@ class DemoBackend implements Backend {
   async giveBack(): Promise<{ outcome: string; on_board: boolean }> { throw LIVE_ONLY(); }
   async boardAction(): Promise<void> { throw LIVE_ONLY(); }
   async radioToken(): Promise<{ url: string; token: string; room: string; name: string }> { throw LIVE_ONLY(); }
+
+  // --- desk (demo): manual mode holds bookings created after the switch
+  private desk: { mode: DeskMode; held: Map<string, DeskMethod | null>; released: Map<string, DeskMethod> } = { mode: "auto", held: new Map(), released: new Map() };
+  private calls: WaCall[] = [];
+  private deskDecorate(r: DispatchRow): DispatchRow {
+    const rel = this.desk.released.get(r.id);
+    return { ...r, deskHold: this.desk.held.has(r.id), deskMethod: rel ?? null, deskReleasedAt: rel ? r.createdAt : null, boardHold: rel === "manual" ? true : r.boardHold };
+  }
+  async deskMode() { return this.desk.mode; }
+  async setDeskMode(mode: DeskMode) {
+    this.desk.mode = mode;
+    if (mode === "manual") this.deskSince = new Date().toISOString(); else this.desk.held.clear();
+  }
+  async deskRows() {
+    const cutoff = new Date(Date.now() - 48 * 3600_000).toISOString();
+    if (this.desk.mode === "manual") {
+      for (const r of this.store.dispatchRows()) if (r.createdAt > (this.deskSince ?? "") && !this.desk.released.has(r.id)) this.desk.held.set(r.id, null);
+    }
+    return this.store.dispatchRows().map((r) => this.deskDecorate(r))
+      .filter((r) => r.deskHold || r.createdAt >= cutoff).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+  private deskSince: string | null = null;
+  async deskRelease(id: string, _v: number, method: DeskMethod) {
+    this.desk.held.delete(id); this.desk.released.set(id, method);
+    return { note: null };
+  }
+  async callerHistory(phone: string) {
+    return this.store.dispatchRows().filter((r) => r.passengerPhone === phone).map((r) => this.deskDecorate(r));
+  }
+  async waCalls() { return [...this.calls].sort((a, b) => b.startedAt.localeCompare(a.startedAt)); }
+  async callAction(id: string, action: "accept" | "reject" | "terminate") {
+    const c = this.calls.find((x) => x.id === id);
+    if (!c) throw new CommandError("call_not_found");
+    const now = new Date().toISOString();
+    if (action === "accept") Object.assign(c, { status: "active", connectedAt: now, answeredByMe: true, answeredBy: "demo", offerSdp: null });
+    if (action === "reject") Object.assign(c, { status: "rejected", endedAt: now, offerSdp: null });
+    if (action === "terminate") Object.assign(c, { status: "ended", endedAt: now, durationS: Math.round((Date.now() - new Date(c.connectedAt ?? now).getTime()) / 1000) });
+    this.notify("wa_calls");
+  }
+  async linkCallBooking(id: string, ref: string) { const c = this.calls.find((x) => x.id === id); if (c) c.bookingRef = ref; }
+  simulateCall() {
+    this.calls.push({ id: crypto.randomUUID(), status: "ringing", phone: "+5491155550002", waId: "5491155550002", name: "Familia Pereyra",
+      offerSdp: null, answeredBy: null, answeredByMe: false, startedAt: new Date().toISOString(), connectedAt: null, endedAt: null, durationS: null, bookingRef: null, conversationId: null });
+    this.notify("wa_calls");
+  }
+  private listeners = new Set<(t: string) => void>();
+  private notify(t: string) { for (const l of this.listeners) l(t); }
 
   private wa = demoWhatsApp();
   async waConversations() { return [...this.wa.convs].sort((a, b) => (b.lastAt ?? "").localeCompare(a.lastAt ?? "")); }
@@ -381,7 +450,7 @@ class SupabaseBackend implements Backend {
   }
   subscribe(onChange: (table: string) => void) {
     const ch = this.sb.channel(`live-${Math.random().toString(36).slice(2)}`);
-    for (const table of ["driver_locations", "bookings", "assignments", "booking_offers", "wa_conversations", "wa_messages"]) {
+    for (const table of ["driver_locations", "bookings", "assignments", "booking_offers", "wa_conversations", "wa_messages", "wa_calls", "desk_settings"]) {
       ch.on("postgres_changes" as never, { event: "*", schema: "public", table } as never, () => onChange(table));
     }
     ch.subscribe();
@@ -436,6 +505,52 @@ class SupabaseBackend implements Backend {
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new CommandError(body?.error?.code ?? "send_failed", body?.error?.message);
   }
+  async deskMode(): Promise<DeskMode> {
+    const { data } = await this.sb.from("desk_settings").select("mode").maybeSingle();
+    return (data?.mode as DeskMode) ?? "auto";
+  }
+  async setDeskMode(mode: DeskMode) { await this.rpc("desk_set_mode", { p_mode: mode }); }
+  async deskRows() {
+    const since = new Date(Date.now() - 48 * 3600_000).toISOString();
+    const { data, error } = await this.sb.from("dispatch_booking_rows").select("*")
+      .or(`desk_hold.eq.true,created_at.gte.${since}`).order("created_at", { ascending: false }).limit(300);
+    if (error) throw error;
+    return (data ?? []).map((r) => camelize<DispatchRow>(r));
+  }
+  async deskRelease(bookingId: string, version: number, method: DeskMethod) {
+    return this.rpc<{ note?: string | null }>("desk_release", { p_booking: bookingId, p_expected_version: version, p_method: method });
+  }
+  async callerHistory(phone: string) {
+    const { data, error } = await this.sb.from("dispatch_booking_rows").select("*").eq("passenger_phone", phone)
+      .order("agreed_pickup_at", { ascending: false }).limit(20);
+    if (error) throw error;
+    return (data ?? []).map((r) => camelize<DispatchRow>(r));
+  }
+  async waCalls(): Promise<WaCall[]> {
+    const since = new Date(Date.now() - 24 * 3600_000).toISOString();
+    const [{ data, error }, { data: u }] = await Promise.all([
+      this.sb.from("wa_calls").select("*, bookings(reference)").gte("started_at", since).order("started_at", { ascending: false }).limit(100),
+      this.sb.auth.getUser(),
+    ]);
+    if (error) throw new CommandError(error.message);
+    // deno-lint-ignore no-explicit-any
+    return (data ?? []).map((r: any) => ({
+      id: r.id, status: r.status, phone: r.phone_e164, waId: r.wa_id, name: r.caller_name, offerSdp: r.offer_sdp, answeredBy: r.answered_by,
+      answeredByMe: !!u?.user && r.answered_by === u.user.id, startedAt: r.started_at, connectedAt: r.connected_at, endedAt: r.ended_at,
+      durationS: r.duration_s, bookingRef: r.bookings?.reference ?? null, conversationId: r.conversation_id,
+    }));
+  }
+  async callAction(callId: string, action: "accept" | "reject" | "terminate", sdp?: string) {
+    const { data } = await this.sb.auth.getSession();
+    if (!data.session) throw new CommandError("unauthenticated");
+    const res = await fetch(`${this.url}/functions/v1/whatsapp/call-action`, {
+      method: "POST", headers: { apikey: this.anonKey, authorization: `Bearer ${data.session.access_token}`, "content-type": "application/json" },
+      body: JSON.stringify({ callId, action, sdp }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new CommandError(body?.error?.code ?? "call_error", body?.error?.message);
+  }
+  async linkCallBooking(callId: string, reference: string) { await this.rpc("desk_call_link_booking", { p_call: callId, p_reference: reference }); }
   async radioToken() {
     const { data } = await this.sb.auth.getSession();
     if (!data.session) throw new CommandError("unauthenticated");

@@ -2,7 +2,8 @@
 //   GET  /whatsapp              Meta webhook verification (hub.challenge, WHATSAPP_VERIFY_TOKEN)
 //   POST /whatsapp              Meta webhook: X-Hub-Signature-256 checked with WHATSAPP_APP_SECRET
 //   POST /whatsapp/outbox       notification worker, called every minute by pg_cron (x-outbox-key)
-//   POST /whatsapp/staff-send   dispatcher reply from the inbox (Supabase access token, admin/dispatcher)
+//   POST /whatsapp/staff-send   staff reply from the inbox (Supabase access token; admin, dispatcher or agent)
+//   POST /whatsapp/call-action  answer (SDP), reject or hang up a WhatsApp voice call (same staff check)
 // Secrets: WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_APP_SECRET, WHATSAPP_VERIFY_TOKEN,
 //          optional AI_API_KEY (+ AI_BASE_URL, AI_MODEL), WHATSAPP_TEMPLATES (JSON), PUBLIC_APP_URL.
 
@@ -10,9 +11,9 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import { ApiError } from "../_shared/api/store.ts";
 import { SupabaseStore } from "../_shared/api/supabaseStore.ts";
 import { makeExtractor } from "../_shared/whatsapp/ai.ts";
-import { graphSender, parseWebhook, verifySignature } from "../_shared/whatsapp/meta.ts";
+import { graphCalls, graphSender, parseWebhook, verifySignature } from "../_shared/whatsapp/meta.ts";
 import type { NotificationContext, TemplateMap } from "../_shared/whatsapp/notify.ts";
-import { processOutbox, processWebhook, sendAndRecord, type ConversationRow, type ServiceDeps, type WaDb } from "../_shared/whatsapp/service.ts";
+import { callAction, processOutbox, processWebhook, sendAndRecord, type CallRow, type ConversationRow, type ServiceDeps, type WaDb } from "../_shared/whatsapp/service.ts";
 
 function serviceKey(): string {
   const legacy = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
@@ -69,7 +70,31 @@ const waDb: WaDb = {
   outboxFinish: (job, ok, error, final) => rpc("wa_outbox_finish", { p_job: job, p_ok: ok, p_error: error, p_final: final }),
   notificationContext: (kind, payload) => rpc<NotificationContext | null>("wa_notification_context", { p_kind: kind, p_payload: payload }),
   openConversationForNotify: (op, wa) => rpc<string | null>("wa_open_conversation_for_notify", { p_operator: op, p_wa_id: wa }),
+  callIncoming: (op, id, wa, name, sdp) => rpc<string | null>("wa_call_incoming", { p_operator: op, p_call_id: id, p_wa_id: wa, p_name: name, p_sdp: sdp }),
+  callTerminated: (id, status, duration, error) => rpc("wa_call_terminated", { p_call_id: id, p_status: status, p_duration: duration, p_error: error }),
+  async callGet(id) {
+    const { data, error } = await db.from("wa_calls").select("id, operator_id, provider_call_id, status, answered_by").eq("id", id).maybeSingle();
+    if (error) throw new Error(error.message);
+    return (data as CallRow) ?? null;
+  },
+  async callClaim(id, user) {
+    const r = await rpc<CallRow | null>("wa_call_claim", { p_call: id, p_user: user });
+    return r?.id ? r : null;
+  },
+  callSet: async (id, status, error = null) => { await rpc("wa_call_set", { p_call: id, p_status: status, p_error: error }); },
 };
+
+const DESK_ROLES = ["admin", "dispatcher", "agent"];
+async function staffOf(userId: string, operatorId: string) {
+  const { data } = await db.from("memberships").select("role").eq("operator_id", operatorId).eq("user_id", userId).eq("active", true);
+  return (data ?? []).some((r) => DESK_ROLES.includes(r.role));
+}
+async function staffUser(req: Request) {
+  const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.get("authorization") ?? "")?.[1];
+  if (!bearer) return null;
+  const { data: u } = await db.auth.getUser(bearer);
+  return u?.user ?? null;
+}
 
 const configured = () => !!(env("WHATSAPP_ACCESS_TOKEN") && env("WHATSAPP_PHONE_NUMBER_ID"));
 const sender = graphSender(env("WHATSAPP_PHONE_NUMBER_ID"), env("WHATSAPP_ACCESS_TOKEN"));
@@ -79,6 +104,7 @@ const ai = env("AI_API_KEY")
 
 const deps: ServiceDeps = {
   db: waDb, store, sender, ai, log, templates, statusTokenSecret: STATUS_SECRET, publicAppUrl: PUBLIC_APP_URL,
+  calls: configured() ? graphCalls(env("WHATSAPP_PHONE_NUMBER_ID"), env("WHATSAPP_ACCESS_TOKEN")) : undefined,
   async config() {
     const c = await store.loadConfig(SLUG);
     if (!c) throw new Error("operator_not_configured");
@@ -114,19 +140,26 @@ Deno.serve(async (req) => {
     return json(200, r);
   }
 
-  // --- Staff reply from the dispatch inbox
+  // --- WhatsApp voice call actions from the booking desk
+  if (path.endsWith("/call-action")) {
+    const user = await staffUser(req);
+    if (!user) return json(401, { error: { code: "unauthenticated" } });
+    const body = await req.json().catch(() => ({}));
+    const r = await callAction(deps, user.id, (op) => staffOf(user.id, op), body ?? {});
+    return json(r.status, r.body);
+  }
+
+  // --- Staff reply from the inbox
   if (path.endsWith("/staff-send")) {
-    const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.get("authorization") ?? "")?.[1];
-    if (!bearer) return json(401, { error: { code: "unauthenticated" } });
-    const { data: u } = await db.auth.getUser(bearer);
-    if (!u?.user) return json(401, { error: { code: "unauthenticated" } });
+    const user = await staffUser(req);
+    if (!user) return json(401, { error: { code: "unauthenticated" } });
+    const u = { user };
     const body = await req.json().catch(() => ({}));
     const text = String(body?.text ?? "").trim();
     if (!body?.conversationId || !text || text.length > 4000) return json(400, { error: { code: "invalid_request" } });
     const { data: c } = await db.from("wa_conversations").select("id, operator_id, wa_id, last_inbound_at").eq("id", body.conversationId).maybeSingle();
     if (!c) return json(404, { error: { code: "conversation_not_found" } });
-    const { data: roles } = await db.from("memberships").select("role").eq("operator_id", c.operator_id).eq("user_id", u.user.id).eq("active", true);
-    if (!(roles ?? []).some((r) => r.role === "admin" || r.role === "dispatcher")) return json(403, { error: { code: "forbidden" } });
+    if (!(await staffOf(u.user.id, c.operator_id))) return json(403, { error: { code: "forbidden" } });
     if (!c.last_inbound_at || Date.now() - new Date(c.last_inbound_at).getTime() > 24 * 3600_000) {
       return json(409, { error: { code: "window_closed", message: "Más de 24 h sin mensajes del cliente: WhatsApp sólo permite plantillas aprobadas." } });
     }

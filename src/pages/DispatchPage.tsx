@@ -28,7 +28,7 @@ const COLLECT_ES: Record<string, string> = { awaiting_payment: "pago pendiente",
 const VC_ES: Record<string, string> = { sedan_premium: "Sedán", minivan: "Minivan", taxibus: "TaxiBus" };
 const SOURCE_ES: Record<string, string> = { web: "Web", whatsapp: "WhatsApp", staff: "Despacho", phone: "Teléfono", voice: "Voz" };
 
-function StaffLogin({ onDone }: { onDone: (s: StaffSession) => void }) {
+export function StaffLogin({ onDone, title = L.title }: { onDone: (s: StaffSession) => void; title?: string }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [err, setErr] = useState<string | null>(null);
@@ -41,7 +41,7 @@ function StaffLogin({ onDone }: { onDone: (s: StaffSession) => void }) {
     <div className="mx-auto max-w-sm px-5 py-24">
       <div className="rounded-3xl border border-ink-700 bg-ink-900 p-7">
         <Logo />
-        <h1 className="mt-6 text-xl font-semibold">{L.title}</h1>
+        <h1 className="mt-6 text-xl font-semibold">{title}</h1>
         {backend.mode === "demo" ? (
           <>
             <p className="mt-2 text-sm text-ink-300">Modo demo: entrás como despachante de prueba.</p>
@@ -77,6 +77,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
   const [date, setDate] = useState(addDaysLocal(today, 1));
   const [tab, setTab] = useState<"schedule" | "map" | "bookings" | "whatsapp">("schedule");
   const [waPending, setWaPending] = useState(0);
+  const [atDesk, setAtDesk] = useState(0);
   useEffect(() => {
     const tick = () => backend.waConversations().then((c) => setWaPending(c.filter((x) => x.needsStaff && !x.handoffOwner).length)).catch(() => {});
     tick();
@@ -103,8 +104,11 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
     try {
       const { from, to } = dayBounds(date);
       const [r, d, bd] = await Promise.all([backend.dispatchRows(from, to), backend.drivers(), backend.driverBoard().catch(() => [] as BoardRow[])]);
-      setRows(r); setDrivers(d); setBoard(bd); setLoadedAt(new Date());
-      setSelected((cur) => (cur ? r.find((x) => x.id === cur.id) ?? cur : cur));
+      // Bookings still at the booking desk (manual mode) aren't dispatch's yet.
+      setAtDesk(r.filter((x) => x.deskHold).length);
+      const mine = r.filter((x) => !x.deskHold);
+      setRows(mine); setDrivers(d); setBoard(bd); setLoadedAt(new Date());
+      setSelected((cur) => (cur ? mine.find((x) => x.id === cur.id) ?? cur : cur));
     } catch (e) { setError((e as Error).message); }
     finally { setLoading(false); }
   }, [date]);
@@ -165,6 +169,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
           </nav>
           <div className="ml-auto flex items-center gap-3 text-sm">
             <Radio compact disabled={backend.mode === "demo"} />
+            <Link to="/central" className="text-ink-300 hover:text-white">Central →</Link>
             <Link to="/despacho/nueva"><Button className="py-2">+ {L.newBooking}</Button></Link>
             <span className="hidden text-ink-400 md:inline">{session.label}</span>
             <Button variant="ghost" className="px-2 py-2" onClick={onSignOut}>{L.signOut}</Button>
@@ -198,6 +203,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
           <Stat n={rows.filter((r) => r.onBoard).length} label="en la bolsa" tone="text-sky-300" />
           <Stat n={counts.held} label="en hold" tone="text-sky-300" />
           <Stat n={counts.confirmed} label="confirmados" tone="text-emerald-300" />
+          {atDesk > 0 && <Link to="/central" className="hover:underline"><Stat n={atDesk} label="esperando en la central" tone="text-cab-300" /></Link>}
         </div>
 
         {error && <p role="alert" className="mb-4 rounded-xl bg-red-500/10 px-4 py-3 text-sm text-red-300">No se pudieron cargar las reservas: {error}</p>}

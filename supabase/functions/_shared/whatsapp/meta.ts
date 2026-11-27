@@ -24,10 +24,23 @@ export interface StatusUpdate {
   error?: string;
 }
 
+/** Voice call event (Cloud API Calling, webhook field "calls"). */
+export interface CallEvent {
+  id: string;                 // Meta call id (wacid…)
+  from: string;               // caller wa_id (digits); may be empty if Meta omits it
+  profileName?: string;
+  event: "connect" | "terminate";
+  sdp?: string;               // WebRTC offer on connect
+  status?: string;            // COMPLETED | FAILED on terminate
+  duration?: number;          // seconds, only if answered
+  error?: string;
+}
+
 export interface ParsedWebhook {
   phoneNumberId: string | null;
   messages: InboundMessage[];
   statuses: StatusUpdate[];
+  calls: CallEvent[];
 }
 
 export type Outbound =
@@ -61,7 +74,7 @@ export async function verifySignature(rawBody: string, header: string | null, ap
 type Any = any;
 
 export function parseWebhook(body: Any): ParsedWebhook {
-  const out: ParsedWebhook = { phoneNumberId: null, messages: [], statuses: [] };
+  const out: ParsedWebhook = { phoneNumberId: null, messages: [], statuses: [], calls: [] };
   for (const entry of body?.entry ?? []) {
     for (const change of entry?.changes ?? []) {
       const v = change?.value ?? {};
@@ -89,6 +102,18 @@ export function parseWebhook(body: Any): ParsedWebhook {
           out.messages.push({ ...base, type: "other" });
         }
       }
+      for (const c of v.calls ?? []) {
+        if (!c?.id || (c.event !== "connect" && c.event !== "terminate")) continue;
+        const from = String(c.from ?? "").replace(/\D/g, "");
+        out.calls.push({
+          id: String(c.id), from, profileName: names.get(from) || undefined, event: c.event,
+          sdp: c.event === "connect" && c.session?.sdp_type === "offer" ? String(c.session.sdp ?? "") : undefined,
+          status: c.status ? String(c.status) : undefined,
+          duration: Number.isFinite(Number(c.duration)) ? Number(c.duration) : undefined,
+          error: c.errors?.[0] ? `${c.errors[0].code}: ${c.errors[0].message ?? c.errors[0].title ?? ""}`.slice(0, 300) : undefined,
+        });
+      }
+      // Call status updates (RINGING/ACCEPTED/REJECTED for business-initiated calls) are ignored here.
       for (const s of v.statuses ?? []) {
         if (!s?.id || !["sent", "delivered", "read", "failed"].includes(s.status)) continue;
         out.statuses.push({
@@ -176,6 +201,35 @@ export function graphSender(phoneNumberId: string, accessToken: string, fetchImp
         return { id: j?.messages?.[0]?.id };
       } catch (e) {
         return { error: `network: ${(e as Error).message}`.slice(0, 300) };
+      }
+    },
+  };
+}
+
+export type CallActionName = "pre_accept" | "accept" | "reject" | "terminate";
+
+export interface CallApi {
+  action(callId: string, action: CallActionName, sdp?: string): Promise<{ ok: boolean; error?: string }>;
+}
+
+/** Graph API /calls actions (answer with a WebRTC SDP answer, reject, hang up). */
+export function graphCalls(phoneNumberId: string, accessToken: string, fetchImpl: typeof fetch = fetch): CallApi {
+  return {
+    async action(callId, action, sdp) {
+      const body: Record<string, unknown> = { messaging_product: "whatsapp", call_id: callId, action };
+      if (action === "pre_accept" || action === "accept") body.session = { sdp_type: "answer", sdp };
+      try {
+        const r = await fetchImpl(`https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/calls`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(10_000),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || j?.success === false) return { ok: false, error: `${r.status} ${j?.error?.code ?? ""} ${j?.error?.message ?? ""}`.trim().slice(0, 300) };
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: `network: ${(e as Error).message}`.slice(0, 300) };
       }
     },
   };

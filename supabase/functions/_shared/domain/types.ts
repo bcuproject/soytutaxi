@@ -8,7 +8,7 @@ export type BookingState = "requested" | "needs_driver" | "held" | "confirmed" |
 export type CollectionState = "not_applicable" | "awaiting_payment" | "pending_collection" | "collected" | "waived";
 export type AssignmentState = "reserving" | "confirmed" | "released";
 export type TripStage = "scheduled" | "en_route" | "at_pickup" | "onboard" | "complete" | "no_show";
-export type MemberRole = "admin" | "dispatcher" | "finance" | "driver";
+export type MemberRole = "admin" | "dispatcher" | "finance" | "driver" | "agent";
 
 export interface VehicleClass {
   code: string;

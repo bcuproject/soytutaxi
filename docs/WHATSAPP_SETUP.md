@@ -79,6 +79,32 @@ Template body variables, in order:
 
 Without a template, a notification that falls outside the window is skipped. The reason `no_template` is recorded in the outbox.
 
+## 6. WhatsApp voice calls in the Central de reservas
+
+Customers can tap the 📞 call button in the WhatsApp chat. The call rings on the **Central de reservas**
+(`/central`), where an agent answers in the browser with a headset.
+
+1. In WhatsApp → **Configuration → Webhook fields**, also subscribe to **calls**.
+2. Turn calling on for the number. In Graph API Explorer (or curl), using the same access token:
+   `POST https://graph.facebook.com/v22.0/<PHONE_NUMBER_ID>/settings` with body
+   `{"calling": {"status": "ENABLED", "call_icon_visibility": "DEFAULT"}}`.
+   Meta requires a messaging limit of 2,000 or more for real numbers. Test numbers are meant for trying calling out.
+3. Open `/central` in Chrome or Edge on a computer with a headset, log in, and allow the microphone when asked.
+   Keep the tab open: calls ring there with a sound and **Atender / Rechazar** buttons.
+4. Calls must be answered within about 30–60 seconds, or WhatsApp shows the caller "Not answered" and the call
+   appears as **Perdida** in the Llamadas tab.
+
+**Who can use the Central:** create the person in Supabase Auth, then run
+`select app.grant_role_by_email('soytutaxi', 'person@email', 'agent');`. Agents use the Central and the WhatsApp
+inbox and can create bookings. They can't assign drivers or cancel in Despacho. Dispatchers and admins can use both screens.
+
+**Auto / Manual (top right of the Central):**
+- **Auto:** every new booking (web, WhatsApp bot, phone) goes straight to dispatch.
+- **Manual:** new bookings wait under **Entrantes → Por enviar a despacho** until an agent sends them, choosing one of:
+  - **⚡ Automático:** offered right away to the nearest free drivers.
+  - **📋 Bolsa:** listed on the drivers' job board; urgent jobs are still offered automatically.
+  - **👤 Manual:** stays in Despacho for a dispatcher to assign.
+
 ## Moving to the real number later
 
 Register the live SoyTuTaxi number in the same Meta app, then replace `WHATSAPP_PHONE_NUMBER_ID` and

@@ -5,7 +5,8 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DEMO_OPERATOR_ID, DEMO_STAFF } from "@shared/domain/fixtures.ts";
 import type { Outbound, ParsedWebhook, Sender } from "@shared/whatsapp/meta.ts";
-import { processOutbox, processWebhook, type ServiceDeps, type WaDb } from "@shared/whatsapp/service.ts";
+import { callAction, processOutbox, processWebhook, type ServiceDeps, type WaDb } from "@shared/whatsapp/service.ts";
+import { parseWebhook, type CallApi } from "@shared/whatsapp/meta.ts";
 import { DB_URL, PgStore } from "./pgStore.ts";
 import { ApiError } from "@shared/api/store.ts";
 
@@ -42,6 +43,11 @@ const waDb: WaDb = {
   outboxFinish: (job, ok, error, final) => rpc("wa_outbox_finish", { p_job: job, p_ok: ok, p_error: error, p_final: final }),
   notificationContext: (kind, payload) => rpc("wa_notification_context", { p_kind: kind, p_payload: payload }),
   openConversationForNotify: (op, wa) => rpc("wa_open_conversation_for_notify", { p_operator: op, p_wa_id: wa }),
+  callIncoming: (op, id, wa, name, sdp) => rpc("wa_call_incoming", { p_operator: op, p_call_id: id, p_wa_id: wa, p_name: name, p_sdp: sdp }),
+  callTerminated: (id, status, duration, error) => rpc("wa_call_terminated", { p_call_id: id, p_status: status, p_duration: duration, p_error: error }),
+  callGet: async (id) => (await q("select * from wa_calls where id = $1", [id]))[0] ?? null,
+  callClaim: async (id, user) => { const r = (await q("select (c).* from (select public.wa_call_claim(p_call => $1, p_user => $2) as c) t", [id, user]))[0]; return r?.id ? r : null; },
+  callSet: async (id, status, error = null) => { await rpc("wa_call_set", { p_call: id, p_status: status, p_error: error }); },
 };
 
 const sent: { to: string; m: Outbound }[] = [];
@@ -52,7 +58,7 @@ let seq = 0;
 
 const PAX = "447700900555";
 const hook = (m: Record<string, unknown>, from = PAX, name = "Grace Hopper"): ParsedWebhook => ({
-  phoneNumberId: "1", statuses: [],
+  phoneNumberId: "1", statuses: [], calls: [],
   messages: [{ id: `wamid.in${++seq}`, from, profileName: name, timestamp: 0, rawType: "text", type: "text", ...m } as any],
 });
 const say = (text: string, from?: string) => processWebhook(hook({ type: "text", text }, from), deps);
@@ -220,5 +226,45 @@ describe("WhatsApp permissions", () => {
     };
     expect(await read(DISPATCHER)).toBeGreaterThan(5);
     expect(await read("00000000-0000-4000-8000-0000000000aa")).toBe(0);
+  });
+});
+
+describe("WhatsApp calls through the webhook (database)", () => {
+  const AGENT2 = "77777777-0000-4000-8000-000000000002";
+  const actions: string[] = [];
+  const api: CallApi = { async action(id, a, sdp) { actions.push(`${a}:${id}${sdp ? ":sdp" : ""}`); return { ok: true }; } };
+  const callHook = (calls: unknown[]) => parseWebhook({ entry: [{ changes: [{ field: "calls", value: {
+    metadata: { phone_number_id: "1" }, contacts: [{ wa_id: "5491155557777", profile: { name: "Caller Uno" } }], calls } }] }] });
+
+  it("rings, is answered by exactly one agent, then hangs up", async () => {
+    await processWebhook(callHook([{ id: "wacid.X1", from: "5491155557777", to: "1", event: "connect", timestamp: "1", direction: "USER_INITIATED",
+      session: { sdp_type: "offer", sdp: "v=0\r\no=- offer" } }]), deps);
+    const [c] = await q("select * from wa_calls where provider_call_id = 'wacid.X1'");
+    expect(c).toMatchObject({ status: "ringing", caller_name: "Caller Uno", phone_e164: "+5491155557777" });
+    const d = { ...deps, calls: api };
+    const staff = async () => true;
+    const [r1, r2] = await Promise.all([
+      callAction(d, DISPATCHER, staff, { callId: c.id, action: "accept", sdp: "v=0\r\nanswer" }),
+      callAction(d, AGENT2, staff, { callId: c.id, action: "accept", sdp: "v=0\r\nanswer" }),
+    ]);
+    expect([r1.status, r2.status].sort()).toEqual([200, 409]);
+    expect(actions).toEqual(["pre_accept:wacid.X1:sdp", "accept:wacid.X1:sdp"]);
+    expect((await q("select status, connected_at is not null as c from wa_calls where id = $1", [c.id]))[0]).toEqual({ status: "active", c: true });
+    expect((await callAction(d, DISPATCHER, staff, { callId: c.id, action: "terminate" })).status).toBe(200);
+    expect(actions.at(-1)).toBe("terminate:wacid.X1");
+    await processWebhook(callHook([{ id: "wacid.X1", event: "terminate", status: "COMPLETED", duration: 42 }]), deps);
+    expect((await q("select status, duration_s from wa_calls where id = $1", [c.id]))[0]).toEqual({ status: "ended", duration_s: 42 });
+  });
+
+  it("refuses outsiders, bad input, and declining a call already answered", async () => {
+    await processWebhook(callHook([{ id: "wacid.X2", from: "5491155557777", event: "connect", session: { sdp_type: "offer", sdp: "v=0 x" } }]), deps);
+    const [c] = await q("select id from wa_calls where provider_call_id = 'wacid.X2'");
+    const d = { ...deps, calls: api };
+    expect((await callAction(d, DISPATCHER, async () => false, { callId: c.id, action: "accept", sdp: "v=0" })).status).toBe(403);
+    expect((await callAction(d, DISPATCHER, async () => true, { callId: c.id, action: "accept", sdp: "<script>" })).status).toBe(400);
+    expect((await callAction(d, DISPATCHER, async () => true, { callId: c.id, action: "explode" })).status).toBe(400);
+    expect((await callAction(d, DISPATCHER, async () => true, { callId: c.id, action: "reject" })).body).toEqual({ status: "rejected" });
+    expect((await callAction(d, DISPATCHER, async () => true, { callId: c.id, action: "reject" })).status).toBe(409);
+    expect((await callAction({ ...deps, calls: undefined }, DISPATCHER, async () => true, { callId: c.id, action: "reject" })).status).toBe(503);
   });
 });

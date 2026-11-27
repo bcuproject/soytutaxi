@@ -5,13 +5,18 @@ import type { OperatorConfig } from "../domain/types.ts";
 import type { Store } from "../api/store.ts";
 import type { Extractor } from "./ai.ts";
 import { handleMessage, type BookingSummary, type ConversationState, type Draft, type Step } from "./engine.ts";
-import { previewOf, type InboundMessage, type Outbound, type ParsedWebhook, type Sender, type StatusUpdate } from "./meta.ts";
+import { previewOf, type CallApi, type InboundMessage, type Outbound, type ParsedWebhook, type Sender, type StatusUpdate } from "./meta.ts";
 import { composeNotification, type NotificationContext, type TemplateMap } from "./notify.ts";
 
 export interface ConversationRow {
   id: string; operator_id: string; wa_id: string; phone_e164: string; profile_name: string | null;
   kind: "passenger" | "driver"; driver_id: string | null; locale: "es-AR" | "en"; step: string; draft: Draft;
   handoff_owner: string | null; version: number;
+}
+
+export interface CallRow {
+  id: string; operator_id: string; provider_call_id: string; status: "ringing" | "answering" | "active" | "ended" | "missed" | "rejected" | "failed";
+  answered_by: string | null;
 }
 
 export interface OutboxJob { id: string; kind: string; payload: Record<string, unknown>; attempts: number }
@@ -30,6 +35,11 @@ export interface WaDb {
   outboxClaim(limit: number): Promise<OutboxJob[]>;
   outboxFinish(jobId: string, ok: boolean, error: string | null, final: boolean): Promise<void>;
   notificationContext(kind: string, payload: Record<string, unknown>): Promise<NotificationContext | null>;
+  callIncoming(operatorId: string, callId: string, waId: string, name: string | null, sdp: string): Promise<string | null>;
+  callTerminated(callId: string, status: string, duration: number | null, error: string | null): Promise<void>;
+  callGet(id: string): Promise<CallRow | null>;
+  callClaim(id: string, userId: string): Promise<CallRow | null>;
+  callSet(id: string, status: CallRow["status"], error?: string | null): Promise<void>;
   /** Find (or create, without opening the 24 h window) the conversation for an outbound notification. */
   openConversationForNotify(operatorId: string, waId: string): Promise<string | null>;
 }
@@ -38,6 +48,7 @@ export interface ServiceDeps {
   db: WaDb;
   store: Store;
   sender: Sender;
+  calls?: CallApi;
   config(): Promise<OperatorConfig>;
   ai?: Extractor | null;
   now?: () => Date;
@@ -60,6 +71,17 @@ export async function sendAndRecord(deps: ServiceDeps, conversationId: string, t
 export async function processWebhook(parsed: ParsedWebhook, deps: ServiceDeps): Promise<{ handled: number; skipped: number }> {
   const log = deps.log ?? (() => {});
   for (const s of parsed.statuses) await applyStatus(deps, s);
+  if (parsed.calls.length) {
+    const cfg = await deps.config();
+    for (const c of parsed.calls) {
+      try {
+        if (c.event === "connect" && c.from && c.sdp) await deps.db.callIncoming(cfg.operatorId, c.id, c.from, c.profileName ?? null, c.sdp);
+        else if (c.event === "terminate") await deps.db.callTerminated(c.id, c.status ?? "COMPLETED", c.duration ?? null, c.error ?? null);
+      } catch (e) {
+        log({ level: "error", where: "wa-call", call: c.id, error: String((e as Error)?.message ?? e).slice(0, 300) });
+      }
+    }
+  }
   let handled = 0, skipped = 0;
   const cfg = parsed.messages.length ? await deps.config() : null;
   for (const msg of parsed.messages) {
@@ -146,4 +168,50 @@ export async function processOutbox(deps: ServiceDeps, limit = 20): Promise<{ se
     }
   }
   return { sent, skipped, failed };
+}
+
+export type CallActionResult = { status: number; body: Record<string, unknown> };
+
+/**
+ * Staff action on a WhatsApp call. accept: claim the ringing call (one agent wins), then pre-accept and
+ * accept with the browser's SDP answer; reject: decline a ringing call; terminate: hang up.
+ */
+export async function callAction(
+  deps: ServiceDeps, userId: string, isStaffOf: (operatorId: string) => Promise<boolean>,
+  input: { callId?: unknown; action?: unknown; sdp?: unknown },
+): Promise<CallActionResult> {
+  const api = deps.calls;
+  if (!api) return { status: 503, body: { error: { code: "whatsapp_not_configured" } } };
+  const id = String(input.callId ?? "");
+  const action = String(input.action ?? "");
+  if (!/^[0-9a-f-]{36}$/.test(id) || !["accept", "reject", "terminate"].includes(action)) return { status: 400, body: { error: { code: "invalid_request" } } };
+  const call = await deps.db.callGet(id);
+  if (!call) return { status: 404, body: { error: { code: "call_not_found" } } };
+  if (!(await isStaffOf(call.operator_id))) return { status: 403, body: { error: { code: "forbidden" } } };
+
+  if (action === "accept") {
+    const sdp = String(input.sdp ?? "");
+    if (!sdp.startsWith("v=0") || sdp.length > 20_000) return { status: 400, body: { error: { code: "invalid_sdp" } } };
+    const claimed = await deps.db.callClaim(id, userId);
+    if (!claimed) return { status: 409, body: { error: { code: call.status === "ringing" ? "call_taken" : `call_${call.status}` } } };
+    const pre = await api.action(call.provider_call_id, "pre_accept", sdp);
+    const acc = pre.ok ? await api.action(call.provider_call_id, "accept", sdp) : pre;
+    if (!acc.ok) {
+      await deps.db.callSet(id, "failed", acc.error ?? "accept_failed");
+      return { status: 502, body: { error: { code: "accept_failed", message: acc.error } } };
+    }
+    await deps.db.callSet(id, "active");
+    return { status: 200, body: { status: "active" } };
+  }
+  if (action === "reject") {
+    if (call.status !== "ringing") return { status: 409, body: { error: { code: `call_${call.status}` } } };
+    const r = await api.action(call.provider_call_id, "reject");
+    await deps.db.callSet(id, "rejected", r.ok ? null : r.error);
+    return { status: 200, body: { status: "rejected" } };
+  }
+  // terminate
+  if (!["answering", "active"].includes(call.status)) return { status: 409, body: { error: { code: `call_${call.status}` } } };
+  const r = await api.action(call.provider_call_id, "terminate");
+  await deps.db.callSet(id, "ended", r.ok ? null : r.error);
+  return { status: 200, body: { status: "ended" } };
 }

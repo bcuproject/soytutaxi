@@ -47,7 +47,18 @@ export function useConfig() {
   return cfg;
 }
 
-export default function BookingPage({ staff = false }: { staff?: boolean }) {
+export interface BookingPageProps {
+  staff?: boolean;
+  /** Booking desk: hide the page header/back link and report the new booking instead of navigating. */
+  embedded?: boolean;
+  prefill?: { name?: string; phone?: string; locale?: string };
+  /** "phone" when the booking is taken during a call. */
+  source?: "phone" | "staff";
+  onDone?: (b: { reference: string; bookingId?: string }) => void;
+  backTo?: { path: string; label: string };
+}
+
+export default function BookingPage({ staff = false, embedded = false, prefill, source, onDone, backTo = { path: "/despacho", label: "Volver a despacho" } }: BookingPageProps) {
   const { t, locale } = useI18n();
   const cfg = useConfig();
   const tomorrow = useMemo(() => addDaysLocal(utcToLocalDate(new Date()), 1), []);
@@ -69,8 +80,8 @@ export default function BookingPage({ staff = false }: { staff?: boolean }) {
   const [errs, setErrs] = useState<FieldErrors>({});
   const [general, setGeneral] = useState<string | null>(null);
 
-  const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
+  const [name, setName] = useState(prefill?.name ?? "");
+  const [phone, setPhone] = useState(prefill?.phone ?? "");
   const [email, setEmail] = useState("");
   const [notes, setNotes] = useState("");
   const [paymentMode, setPaymentMode] = useState<PaymentMode>("prepaid");
@@ -92,6 +103,7 @@ export default function BookingPage({ staff = false }: { staff?: boolean }) {
       const q = await backend.api<QuoteResponse>("POST", "/quotes", {
         direction, airport, zoneCode, place: { text: placeText }, date, time,
         flightDesignator: from ? flight : null, passengers, largeBags, carryOn, vehicleClass, locale,
+        ...(staff && source ? { source } : {}),
       }, await authHeaders());
       setQuote(q); setStep("review"); setIdemKey(crypto.randomUUID());
       window.scrollTo({ top: 0, behavior: "smooth" });
@@ -113,6 +125,7 @@ export default function BookingPage({ staff = false }: { staff?: boolean }) {
         flightExceptionReason: staff && quote.review.direction === "from_airport" && !quote.review.flight ? flightException || null : null,
       }, { ...(await authHeaders()), "idempotency-key": idemKey });
       setBooking(b); setStep("done");
+      onDone?.({ reference: b.reference, bookingId: (b as { bookingId?: string }).bookingId });
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (e) {
       const r = errorsFrom(e, t, leadH);
@@ -145,7 +158,7 @@ export default function BookingPage({ staff = false }: { staff?: boolean }) {
           <TripSummary j={quote.review} t={t} locale={locale} vehicle={vcLabel(quote.vehicleClass)} />
           <div className="mt-6 flex flex-wrap gap-3">
             {staff
-              ? <Button onClick={() => navigate("/despacho")}>Volver a despacho</Button>
+              ? (embedded ? null : <Button onClick={() => navigate(backTo.path)}>{backTo.label}</Button>)
               : <Button onClick={() => navigate(`/reserva/${booking.reference}?t=${booking.statusToken}`)}>{t("done.status")}</Button>}
             <Button variant="outline" onClick={() => { setStep("form"); setQuote(null); setBooking(null); }}>{t("done.new")}</Button>
           </div>
@@ -270,10 +283,10 @@ export default function BookingPage({ staff = false }: { staff?: boolean }) {
 
   // ---------------------------------------------------------------- form
   return (
-    <div className="mx-auto max-w-3xl px-5 py-10">
-      {staff && <Link to="/despacho" className="mb-4 inline-block text-sm text-ink-400 hover:text-white">← Despacho</Link>}
-      <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">{staff ? "Nueva reserva (despacho)" : t("form.title")}</h1>
-      <p className="mt-2 max-w-xl text-ink-300">{t("form.subtitle")}</p>
+    <div className={embedded ? "" : "mx-auto max-w-3xl px-5 py-10"}>
+      {staff && !embedded && <Link to={backTo.path} className="mb-4 inline-block text-sm text-ink-400 hover:text-white">← {backTo.label.replace(/^Volver a /, "")}</Link>}
+      {!embedded && <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">{staff ? "Nueva reserva (despacho)" : t("form.title")}</h1>}
+      {!embedded && <p className="mt-2 max-w-xl text-ink-300">{t("form.subtitle")}</p>}
 
       <form onSubmit={(e) => { e.preventDefault(); requestQuote(); }} className="mt-8 rounded-3xl border border-ink-700 bg-ink-900/60 p-5 sm:p-7" noValidate>
         <div className="grid grid-cols-2 gap-1 rounded-xl bg-ink-800 p-1" role="tablist">
