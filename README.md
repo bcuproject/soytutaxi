@@ -75,6 +75,26 @@ This release is the dispatch backend and web front end for Buenos Aires transfer
   - **Refunds:** stored first, then sent once with an idempotency key and confirmed with Mercado Pago. The passenger is notified.
 - Secrets (`payments` function): `MP_ACCESS_TOKEN` (`TEST-…` for sandbox), `MP_WEBHOOK_SECRET`, optional `MP_COLLECTOR_ID`. Set the policy's `payments_enabled` to true when going live.
 
+## Passenger self-service, ratings and reminders
+- Passengers cancel from the status page, WhatsApp ("Mi reserva" → ❌ Cancelar) or by phone (Sofía). The refund follows the booking's policy
+  (`cancellation.free_until_hours_before` / `refund_percent_after`) and is sent to Mercado Pago automatically. Once the driver is on the way, only staff can cancel.
+- 20 minutes after a completed trip the passenger is asked for a 1–5 rating (WhatsApp list or status page); 1–2 raises an alert and asks for a comment.
+- Confirmed trips get a WhatsApp reminder the day before (08:00–22:00 Buenos Aires; early trips the evening before).
+
+## Drivers: documents, pay statements; reports
+- Despacho → Choferes → Documentación: licence, professional licence, insurance, VTV and remis permit per driver/vehicle. Daily alerts 30 days ahead and when expired.
+  With **Activar bloqueo** on, a driver whose papers are invalid on the trip date can't be assigned, take offers or claim from the board.
+- Despacho → Choferes → Pagos: per-driver balance (earnings − cash collected), adjustments, CSV, "Cerrar liquidación". Drivers see it in Ganancias.
+- Despacho → Informes: bookings, revenue, driver pay, cancellations/refunds, ratings, per-day chart, channels, airports, zones, drivers; CSV.
+
+## Hotel/agency accounts; transfer from Sofía to a person
+- Despacho → Cuentas: accounts with discount and payment terms. In a booking, "Facturar a cuenta" bills the trip to the account (payment mode `account`).
+  Drafts for last month are generated on the 1st; issue → mark paid (or void, which frees the trips). "Ver / imprimir" opens a printable statement.
+- Sofía can put a caller through live: the Central shows "Sofía te pasa una llamada"; **Atender** joins the call's LiveKit room from the browser and Sofía steps out.
+  If nobody answers within 45 s she takes the call back and leaves a callback request.
+
+Before taking real bookings, work through `docs/GO_LIVE.md`.
+
 ## Live staging (26 Nov 2026)
 
 - Supabase project `soytutaxi` (ref `sxjhtsyguacfyixaeydz`, São Paulo). Migrations and demo data applied, `api` Edge Function deployed (`verify_jwt = false`).

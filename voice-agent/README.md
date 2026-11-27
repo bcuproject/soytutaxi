@@ -28,3 +28,10 @@ Hook in `/opt/bcu-livekit/agent.py`, inside `entrypoint`, right after the `call 
 ```
 
 Then restart `bcu-livekit.service` at a quiet moment (live calls on that service drop).
+
+## Live transfer to the Central
+`transfer_to_person` asks the Central for a person (`/whatsapp/voice-tool` action `transfer`). A desk agent who presses **Atender** gets a LiveKit
+token for the same room (identity `desk-…`, from `/whatsapp/call-join`). When that participant joins, Sofía closes her session but the call stays up;
+`run_call` returns when the caller or the agent leaves, and the hook then deletes the room (ending the WhatsApp call). If nobody joins within
+`TRANSFER_WAIT_S` (45 s), Sofía apologises, the call is marked for a WhatsApp callback, and she carries on.
+No change to the hook in `agent.py` is needed for this.
