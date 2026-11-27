@@ -50,6 +50,13 @@ This release is the dispatch backend and web front end for Buenos Aires transfer
 - **Auto / Manual switch:** in Auto, new bookings go straight to dispatch. In Manual, they get `desk_hold`. They stay off the job board, out of automatic escalation and hidden in Despacho until an agent sends them as **Automático** (nearest-first offers now), **Bolsa** (job board) or **Manual** (dispatcher assigns). See `desk_release`.
 - **WhatsApp voice calls** (Cloud API Calling) ring in the browser. Meta's WebRTC offer is stored on `wa_calls`. The agent's browser builds the answer, and `/whatsapp/call-action` claims the call atomically (one agent wins) and sends `pre_accept` + `accept` to Meta. Audio goes browser ↔ WhatsApp directly. During a call, **+ Reserva para este cliente** opens the booking form prefilled with the caller's name and number. The booking is recorded as channel `phone` and linked to the call.
 
+## Voice bot (WhatsApp calls answered by "Sofía", Fish Audio)
+
+- The **Central → Llamadas** switch sets who answers: **👤 Central** (rings the browser) or **🤖 Bot**. In bot mode the webhook hands Meta's offer to LiveKit's WhatsApp connector (`AcceptWhatsAppCall`, agent `bcu-taxi`, attribute `bcu_assistant=soytutaxi`). The BCU server's worker then runs `voice-agent/soytutaxi_voice_agent.py`: Silero VAD, OpenAI transcription (es/en auto-detected), OpenAI LLM and Fish Audio TTS. If LiveKit fails, the call rings the Central.
+- **The bot has no database access.** Its tools (`quote`, `book`, `bookings`, `note`) post to `/whatsapp/voice-tool` with an HMAC token bound to that one call. The server prices with `computeQuote`, books with `create_booking_from_quote` (channel `voice`) and takes the phone number from the call record, never from the AI. It also sends the reference and status link to the caller on WhatsApp. Retries with the same quote don't create a second booking.
+- Notes and callback requests from the bot appear under **Para devolver la llamada**.
+- Server install: see `voice-agent/README.md` and step 7 of `docs/WHATSAPP_SETUP.md`.
+
 ## Live staging (26 Nov 2026)
 
 - Supabase project `soytutaxi` (ref `sxjhtsyguacfyixaeydz`, São Paulo). Migrations and demo data applied, `api` Edge Function deployed (`verify_jwt = false`).

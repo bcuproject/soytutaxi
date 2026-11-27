@@ -95,7 +95,7 @@ describe("job board listing", () => {
 
 describe("claiming", () => {
   it("simultaneous claims by three drivers → exactly one wins, job leaves the board", async () => {
-    const b = await job("STT-DEM001", 44);
+    const b = await job("STT-DEM001", 100);   // well past the seeded day+1/day+2 jobs, whatever the time of day
     const outcomes = await Promise.all(SEDAN.map((i) => one(DU[i], "select driver_claim($1) as r", [b.id]).then((r) => r.outcome, (e) => e.message)));
     expect(outcomes.filter((o) => o === "claimed")).toHaveLength(1);
     expect(outcomes.filter((o) => o === "already_taken")).toHaveLength(2);
@@ -108,9 +108,9 @@ describe("claiming", () => {
   it("enforces the per-day claim cap and hides overlapping jobs", async () => {
     await q(`update policies set config = config || '{"board_max_claims_per_day": 1}' where operator_id = $1`, [DEMO_OPERATOR_ID]);
     try {
-      const a = await job("STT-DEM001", 60);
-      const c = await job("STT-DEM001", 64);        // same local day (or next) — check cap by day
-      const overlap = await job("STT-DEM001", 60.5); // overlaps a
+      const a = await job("STT-DEM001", 150);
+      const c = await job("STT-DEM001", 154);        // same local day (or next) — check cap by day
+      const overlap = await job("STT-DEM001", 150.5); // overlaps a
       expect((await one(DU[2], "select driver_claim($1) as r", [a.id])).outcome).toBe("claimed");
       expect((await board(2)).jobs.some((j: any) => j.bookingId === overlap.id)).toBe(false);
       const sameDay = (await q(`select ((select agreed_pickup_at from bookings where id=$1) at time zone 'America/Argentina/Buenos_Aires')::date = ((select agreed_pickup_at from bookings where id=$2) at time zone 'America/Argentina/Buenos_Aires')::date as same`, [a.id, c.id]))[0].same;

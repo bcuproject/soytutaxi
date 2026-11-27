@@ -7,6 +7,7 @@ import type { Extractor } from "./ai.ts";
 import { handleMessage, type BookingSummary, type ConversationState, type Draft, type Step } from "./engine.ts";
 import { previewOf, type CallApi, type InboundMessage, type Outbound, type ParsedWebhook, type Sender, type StatusUpdate } from "./meta.ts";
 import { composeNotification, type NotificationContext, type TemplateMap } from "./notify.ts";
+import { VOICE_ASSISTANT, voiceToken, type VoiceBot, type VoiceCall } from "./voice.ts";
 
 export interface ConversationRow {
   id: string; operator_id: string; wa_id: string; phone_e164: string; profile_name: string | null;
@@ -40,6 +41,10 @@ export interface WaDb {
   callGet(id: string): Promise<CallRow | null>;
   callClaim(id: string, userId: string): Promise<CallRow | null>;
   callSet(id: string, status: CallRow["status"], error?: string | null): Promise<void>;
+  callRoute(operatorId: string): Promise<{ mode: "desk" | "bot"; voiceId: string | null }>;
+  callBotStarted(operatorId: string, callId: string, waId: string, name: string | null, room: string): Promise<string | null>;
+  callByProvider(providerCallId: string): Promise<VoiceCall | null>;
+  callNote(providerCallId: string, note: string, callback: boolean): Promise<void>;
   /** Find (or create, without opening the 24 h window) the conversation for an outbound notification. */
   openConversationForNotify(operatorId: string, waId: string): Promise<string | null>;
 }
@@ -49,6 +54,11 @@ export interface ServiceDeps {
   store: Store;
   sender: Sender;
   calls?: CallApi;
+  /** LiveKit WhatsApp connector + agent (voice bot). Absent → calls always ring the Central. */
+  voiceBot?: VoiceBot;
+  voiceSecret?: string;
+  /** Public URL of /whatsapp/voice-tool, handed to the agent. */
+  voiceToolUrl?: string;
   config(): Promise<OperatorConfig>;
   ai?: Extractor | null;
   now?: () => Date;
@@ -75,8 +85,15 @@ export async function processWebhook(parsed: ParsedWebhook, deps: ServiceDeps): 
     const cfg = await deps.config();
     for (const c of parsed.calls) {
       try {
-        if (c.event === "connect" && c.from && c.sdp) await deps.db.callIncoming(cfg.operatorId, c.id, c.from, c.profileName ?? null, c.sdp);
-        else if (c.event === "terminate") await deps.db.callTerminated(c.id, c.status ?? "COMPLETED", c.duration ?? null, c.error ?? null);
+        if (c.event === "connect" && c.from && c.sdp) {
+          if (!(await routeToBot(deps, cfg.operatorId, c.id, c.from, c.profileName ?? null, c.sdp, log))) {
+            await deps.db.callIncoming(cfg.operatorId, c.id, c.from, c.profileName ?? null, c.sdp);
+          }
+        } else if (c.event === "terminate") {
+          const known = deps.voiceBot ? await deps.db.callByProvider(c.id) : null;
+          if (known?.handledBy === "bot") await deps.voiceBot!.disconnect(c.id).catch(() => {});
+          await deps.db.callTerminated(c.id, c.status ?? "COMPLETED", c.duration ?? null, c.error ?? null);
+        }
       } catch (e) {
         log({ level: "error", where: "wa-call", call: c.id, error: String((e as Error)?.message ?? e).slice(0, 300) });
       }
@@ -214,4 +231,25 @@ export async function callAction(
   const r = await api.action(call.provider_call_id, "terminate");
   await deps.db.callSet(id, "ended", r.ok ? null : r.error);
   return { status: 200, body: { status: "ended" } };
+}
+
+/** Voice bot answers when the Central chose "Bot" and LiveKit is configured; any failure rings the Central instead. */
+async function routeToBot(deps: ServiceDeps, operatorId: string, callId: string, waId: string, name: string | null, sdp: string,
+  log: (o: Record<string, unknown>) => void): Promise<boolean> {
+  if (!deps.voiceBot || !deps.voiceSecret || !deps.voiceToolUrl) return false;
+  const route = await deps.db.callRoute(operatorId);
+  if (route.mode !== "bot") return false;
+  const room = `stt-call-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+  const phone = `+${waId.replace(/\D/g, "")}`;
+  try {
+    await deps.voiceBot.accept({ callId, sdp, room, callerPhone: phone, attributes: {
+      bcu_assistant: VOICE_ASSISTANT, caller_phone: phone, caller_name: name ?? "", wa_call_id: callId,
+      stt_token: await voiceToken(deps.voiceSecret, callId), stt_api: deps.voiceToolUrl, stt_voice: route.voiceId ?? "",
+    } });
+    await deps.db.callBotStarted(operatorId, callId, waId, name, room);
+    return true;
+  } catch (e) {
+    log({ level: "error", where: "wa-voice-bot", call: callId, error: String((e as Error)?.message ?? e).slice(0, 300) });
+    return false;
+  }
 }

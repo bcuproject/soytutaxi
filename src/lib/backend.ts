@@ -44,7 +44,9 @@ export interface WaCall {
   id: string; status: "ringing" | "answering" | "active" | "ended" | "missed" | "rejected" | "failed";
   phone: string; waId: string; name: string | null; offerSdp: string | null; answeredBy: string | null; answeredByMe: boolean;
   startedAt: string; connectedAt: string | null; endedAt: string | null; durationS: number | null; bookingRef: string | null; conversationId: string | null;
+  handledBy: "desk" | "bot"; wantsCallback: boolean; botNote: string | null; callbackDoneAt: string | null;
 }
+export type CallMode = "desk" | "bot";
 
 export interface Backend {
   mode: "demo" | "live";
@@ -100,6 +102,9 @@ export interface Backend {
   waCalls(): Promise<WaCall[]>;
   callAction(callId: string, action: "accept" | "reject" | "terminate", sdp?: string): Promise<void>;
   linkCallBooking(callId: string, reference: string): Promise<void>;
+  callMode(): Promise<{ mode: CallMode; voiceId: string | null }>;
+  setCallMode(mode: CallMode, voiceId?: string | null): Promise<void>;
+  callbackDone(callId: string): Promise<void>;
   /** Demo only: make a fake WhatsApp call ring. */
   simulateCall?(): void;
 }
@@ -310,9 +315,24 @@ class DemoBackend implements Backend {
     this.notify("wa_calls");
   }
   async linkCallBooking(id: string, ref: string) { const c = this.calls.find((x) => x.id === id); if (c) c.bookingRef = ref; }
+  private callSettings: { mode: CallMode; voiceId: string | null } = { mode: "desk", voiceId: null };
+  async callMode() { return this.callSettings; }
+  async setCallMode(mode: CallMode, voiceId?: string | null) { this.callSettings = { mode, voiceId: voiceId ?? this.callSettings.voiceId }; }
+  async callbackDone(id: string) { const c = this.calls.find((x) => x.id === id); if (c) c.callbackDoneAt = new Date().toISOString(); this.notify("wa_calls"); }
   simulateCall() {
+    if (this.callSettings.mode === "bot") {
+      // Demo of a bot-handled call: answered by Sofía, who booked nothing and asked for a callback.
+      const t = Date.now();
+      this.calls.push({ id: crypto.randomUUID(), status: "ended", phone: "+447700900321", waId: "447700900321", name: "Oliver Smith", offerSdp: null,
+        answeredBy: null, answeredByMe: false, startedAt: new Date(t - 180_000).toISOString(), connectedAt: new Date(t - 178_000).toISOString(),
+        endedAt: new Date(t).toISOString(), durationS: 178, bookingRef: null, conversationId: null, handledBy: "bot", wantsCallback: true,
+        botNote: "Viaja con una silla de ruedas plegable y pregunta si entra en el auto.", callbackDoneAt: null });
+      this.notify("wa_calls");
+      return;
+    }
     this.calls.push({ id: crypto.randomUUID(), status: "ringing", phone: "+5491155550002", waId: "5491155550002", name: "Familia Pereyra",
-      offerSdp: null, answeredBy: null, answeredByMe: false, startedAt: new Date().toISOString(), connectedAt: null, endedAt: null, durationS: null, bookingRef: null, conversationId: null });
+      offerSdp: null, answeredBy: null, answeredByMe: false, startedAt: new Date().toISOString(), connectedAt: null, endedAt: null, durationS: null, bookingRef: null, conversationId: null,
+      handledBy: "desk", wantsCallback: false, botNote: null, callbackDoneAt: null });
     this.notify("wa_calls");
   }
   private listeners = new Set<(t: string) => void>();
@@ -538,6 +558,7 @@ class SupabaseBackend implements Backend {
       id: r.id, status: r.status, phone: r.phone_e164, waId: r.wa_id, name: r.caller_name, offerSdp: r.offer_sdp, answeredBy: r.answered_by,
       answeredByMe: !!u?.user && r.answered_by === u.user.id, startedAt: r.started_at, connectedAt: r.connected_at, endedAt: r.ended_at,
       durationS: r.duration_s, bookingRef: r.bookings?.reference ?? null, conversationId: r.conversation_id,
+      handledBy: r.handled_by ?? "desk", wantsCallback: !!r.wants_callback, botNote: r.bot_note ?? null, callbackDoneAt: r.callback_done_at ?? null,
     }));
   }
   async callAction(callId: string, action: "accept" | "reject" | "terminate", sdp?: string) {
@@ -551,6 +572,12 @@ class SupabaseBackend implements Backend {
     if (!res.ok) throw new CommandError(body?.error?.code ?? "call_error", body?.error?.message);
   }
   async linkCallBooking(callId: string, reference: string) { await this.rpc("desk_call_link_booking", { p_call: callId, p_reference: reference }); }
+  async callMode() {
+    const { data } = await this.sb.from("desk_settings").select("call_mode, fish_voice_id").maybeSingle();
+    return { mode: ((data?.call_mode as CallMode) ?? "desk"), voiceId: (data?.fish_voice_id as string) ?? null };
+  }
+  async setCallMode(mode: CallMode, voiceId?: string | null) { await this.rpc("desk_set_call_mode", { p_mode: mode, p_voice_id: voiceId || null }); }
+  async callbackDone(callId: string) { await this.rpc("desk_callback_done", { p_call: callId }); }
   async radioToken() {
     const { data } = await this.sb.auth.getSession();
     if (!data.session) throw new CommandError("unauthenticated");

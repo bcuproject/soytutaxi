@@ -48,6 +48,14 @@ const waDb: WaDb = {
   callGet: async (id) => (await q("select * from wa_calls where id = $1", [id]))[0] ?? null,
   callClaim: async (id, user) => { const r = (await q("select (c).* from (select public.wa_call_claim(p_call => $1, p_user => $2) as c) t", [id, user]))[0]; return r?.id ? r : null; },
   callSet: async (id, status, error = null) => { await rpc("wa_call_set", { p_call: id, p_status: status, p_error: error }); },
+  callRoute: (op) => rpc("wa_call_route", { p_operator: op }),
+  callBotStarted: (op, id, wa, name, room) => rpc("wa_call_bot_started", { p_operator: op, p_call_id: id, p_wa_id: wa, p_name: name, p_room: room }),
+  callByProvider: async (id) => {
+    const r = (await q("select * from wa_calls where provider_call_id = $1", [id]))[0];
+    return r ? { operatorId: r.operator_id, providerCallId: r.provider_call_id, phone: r.phone_e164, waId: r.wa_id, name: r.caller_name,
+      status: r.status, handledBy: r.handled_by, endedAt: r.ended_at?.toISOString?.() ?? r.ended_at, conversationId: r.conversation_id } : null;
+  },
+  callNote: async (id, note, callback) => { await rpc("wa_call_bot_note", { p_call_id: id, p_note: note, p_callback: callback }); },
 };
 
 const sent: { to: string; m: Outbound }[] = [];
@@ -266,5 +274,95 @@ describe("WhatsApp calls through the webhook (database)", () => {
     expect((await callAction(d, DISPATCHER, async () => true, { callId: c.id, action: "reject" })).body).toEqual({ status: "rejected" });
     expect((await callAction(d, DISPATCHER, async () => true, { callId: c.id, action: "reject" })).status).toBe(409);
     expect((await callAction({ ...deps, calls: undefined }, DISPATCHER, async () => true, { callId: c.id, action: "reject" })).status).toBe(503);
+  });
+});
+
+describe("Voice bot (database)", () => {
+  const accepted: any[] = [];
+  const disconnected: string[] = [];
+  const bot = {
+    async accept(a: any) { if (a.callerPhone === "+5491100009999") throw new Error("livekit down"); accepted.push(a); },
+    async disconnect(id: string) { disconnected.push(id); },
+  };
+  const vdeps = () => ({ ...deps, voiceBot: bot, voiceSecret: "voice-secret", voiceToolUrl: "https://x/functions/v1/whatsapp/voice-tool" });
+  const callHook = (calls: unknown[], name = "Voz Cliente") => parseWebhook({ entry: [{ changes: [{ field: "calls", value: {
+    metadata: { phone_number_id: "1" }, contacts: [{ wa_id: String((calls[0] as any).from ?? ""), profile: { name } }], calls } }] }] });
+  const setMode = (mode: string) => q("insert into desk_settings (operator_id, call_mode) values ($1, $2) on conflict (operator_id) do update set call_mode = excluded.call_mode", [DEMO_OPERATOR_ID, mode]);
+  let tool: (action: string, args?: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<{ status: number; body: any }>;
+
+  beforeAll(async () => {
+    const { voiceTool, voiceToken } = await import("@shared/whatsapp/voice.ts");
+    const store = new PgStore(pool);
+    tool = async (action, args = {}, extra = {}) => voiceTool({
+      cfg: (await store.loadConfig("soytutaxi"))!, store, now: new Date(), secret: "voice-secret", statusTokenSecret: "s", publicAppUrl: "https://example.test",
+      call: (id) => waDb.callByProvider(id), bookingsForPhone: (p) => waDb.bookingsForPhone(DEMO_OPERATOR_ID, p),
+      note: (id, n, cb) => waDb.callNote(id, n, cb),
+      sendWhatsApp: async (c, m) => { sent.push({ to: c.waId, m }); return true; },
+    }, { callId: "wacid.V1", token: await voiceToken("voice-secret", "wacid.V1"), action, args, ...extra });
+  });
+
+  it("desk mode keeps ringing the Central", async () => {
+    await setMode("desk");
+    await processWebhook(callHook([{ id: "wacid.V0", from: "5491100008888", event: "connect", session: { sdp_type: "offer", sdp: "v=0 a" } }]), vdeps());
+    expect(accepted).toHaveLength(0);
+    expect((await q("select status, handled_by from wa_calls where provider_call_id = 'wacid.V0'"))[0]).toEqual({ status: "ringing", handled_by: "desk" });
+  });
+
+  it("bot mode hands the call to the LiveKit agent with a per-call token; LiveKit failure falls back to the Central", async () => {
+    await setMode("bot");
+    await processWebhook(callHook([{ id: "wacid.V1", from: "5491100007777", event: "connect", session: { sdp_type: "offer", sdp: "v=0 b" } }]), vdeps());
+    expect(accepted).toHaveLength(1);
+    expect(accepted[0].attributes).toMatchObject({ bcu_assistant: "soytutaxi", caller_phone: "+5491100007777", wa_call_id: "wacid.V1", caller_name: "Voz Cliente",
+      stt_api: "https://x/functions/v1/whatsapp/voice-tool" });
+    expect(accepted[0].attributes.stt_token.length).toBeGreaterThan(20);
+    expect((await q("select status, handled_by, offer_sdp from wa_calls where provider_call_id = 'wacid.V1'"))[0]).toEqual({ status: "active", handled_by: "bot", offer_sdp: null });
+
+    await processWebhook(callHook([{ id: "wacid.V2", from: "5491100009999", event: "connect", session: { sdp_type: "offer", sdp: "v=0 c" } }]), vdeps());
+    expect((await q("select status, handled_by from wa_calls where provider_call_id = 'wacid.V2'"))[0]).toEqual({ status: "ringing", handled_by: "desk" });
+  });
+
+  it("tools: config, quote, book (WhatsApp sent, phone from the call), bookings, callback note", async () => {
+    const cfg = await tool("config");
+    expect(cfg.status).toBe(200);
+    expect(cfg.body).toMatchObject({ callerName: "Voz Cliente", callerPhoneLast4: "7777" });
+    expect(cfg.body.zones.map((z: any) => z.code)).toContain("palermo");
+    expect(cfg.body.rules.leadTimeHours).toBe(3);
+
+    const date = new Date(Date.now() + 2 * 86400_000).toISOString().slice(0, 10);
+    const bad = await tool("quote", { direction: "to_airport", airport: "AEP", zone: "Narnia", address: "x", date, time: "09:00", passengers: 2, largeBags: 1 });
+    expect(bad.body.ok).toBe(false);
+    expect(bad.body.problems.join(" ")).toContain("zona");
+
+    const quote = await tool("quote", { direction: "to_airport", airport: "AEP", zone: "Recoleta", address: "Av. Alvear 1891", date, time: "09:00", passengers: 2, largeBags: 2, carryOn: 1 });
+    expect(quote.body).toMatchObject({ ok: true, vehicle: "Sedán Premium" });
+    expect(quote.body.price).toMatch(/USD/);
+
+    const booked = await tool("book", { quoteId: quote.body.quoteId, name: "Voz Cliente", paymentMode: "pay_on_pickup_cash", phone: "+999 (ignored)" });
+    expect(booked.body).toMatchObject({ ok: true, whatsappSent: true });
+    expect(booked.body.spoken).toMatch(/^S T T, /);
+    const [b] = await q("select b.source, p.phone_e164 from bookings b join passengers p on p.id = b.passenger_id where b.reference = $1", [booked.body.reference]);
+    expect(b).toEqual({ source: "voice", phone_e164: "+5491100007777" });
+    expect((sent.at(-1)!.m as any).text).toContain(booked.body.reference);
+    // Same quote again (the bot retried) → same booking, no second WhatsApp.
+    const before = sent.length;
+    expect((await tool("book", { quoteId: quote.body.quoteId, name: "Voz Cliente", paymentMode: "pay_on_pickup_cash" })).body.reference).toBe(booked.body.reference);
+    expect(sent.length).toBe(before);
+
+    expect((await tool("bookings")).body.bookings[0]).toMatchObject({ reference: booked.body.reference, state: "buscando chofer" });
+    await tool("note", { note: "Quiere saber si hay sillita para bebé", callback: true });
+    expect((await q("select wants_callback, bot_note from wa_calls where provider_call_id = 'wacid.V1'"))[0]).toEqual({ wants_callback: true, bot_note: "Quiere saber si hay sillita para bebé" });
+  });
+
+  it("refuses wrong tokens and calls the bot didn't answer; disconnects LiveKit when the call ends", async () => {
+    expect((await tool("config", {}, { token: "nope" })).status).toBe(401);
+    const { voiceTool, voiceToken } = await import("@shared/whatsapp/voice.ts");
+    const r = await voiceTool({ cfg: (await new PgStore(pool).loadConfig("soytutaxi"))!, store: new PgStore(pool), now: new Date(), secret: "voice-secret",
+      statusTokenSecret: "s", publicAppUrl: "x", call: (id) => waDb.callByProvider(id), bookingsForPhone: async () => [], note: async () => {}, sendWhatsApp: async () => true },
+      { callId: "wacid.V0", token: await voiceToken("voice-secret", "wacid.V0"), action: "config" });
+    expect(r.status).toBe(404);   // desk-handled call
+    await processWebhook(callHook([{ id: "wacid.V1", from: "5491100007777", event: "terminate", status: "COMPLETED", duration: 120 }]), vdeps());
+    expect(disconnected).toEqual(["wacid.V1"]);
+    expect((await q("select status, duration_s from wa_calls where provider_call_id = 'wacid.V1'"))[0]).toEqual({ status: "ended", duration_s: 120 });
+    await setMode("desk");
   });
 });

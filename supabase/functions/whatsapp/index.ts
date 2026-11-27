@@ -4,6 +4,9 @@
 //   POST /whatsapp/outbox       notification worker, called every minute by pg_cron (x-outbox-key)
 //   POST /whatsapp/staff-send   staff reply from the inbox (Supabase access token; admin, dispatcher or agent)
 //   POST /whatsapp/call-action  answer (SDP), reject or hang up a WhatsApp voice call (same staff check)
+//   POST /whatsapp/voice-tool   tools for the voice bot (LiveKit agent on the BCU server), per-call token
+// Voice bot secrets: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET (same LiveKit project as the agent),
+//                    optional VOICE_TOKEN_SECRET.
 // Secrets: WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_APP_SECRET, WHATSAPP_VERIFY_TOKEN,
 //          optional AI_API_KEY (+ AI_BASE_URL, AI_MODEL), WHATSAPP_TEMPLATES (JSON), PUBLIC_APP_URL.
 
@@ -13,6 +16,7 @@ import { SupabaseStore } from "../_shared/api/supabaseStore.ts";
 import { makeExtractor } from "../_shared/whatsapp/ai.ts";
 import { graphCalls, graphSender, parseWebhook, verifySignature } from "../_shared/whatsapp/meta.ts";
 import type { NotificationContext, TemplateMap } from "../_shared/whatsapp/notify.ts";
+import { liveKitVoiceBot, voiceTool, type VoiceCall } from "../_shared/whatsapp/voice.ts";
 import { callAction, processOutbox, processWebhook, sendAndRecord, type CallRow, type ConversationRow, type ServiceDeps, type WaDb } from "../_shared/whatsapp/service.ts";
 
 function serviceKey(): string {
@@ -82,6 +86,15 @@ const waDb: WaDb = {
     return r?.id ? r : null;
   },
   callSet: async (id, status, error = null) => { await rpc("wa_call_set", { p_call: id, p_status: status, p_error: error }); },
+  callRoute: (op) => rpc("wa_call_route", { p_operator: op }),
+  callBotStarted: (op, id, wa, name, room) => rpc<string | null>("wa_call_bot_started", { p_operator: op, p_call_id: id, p_wa_id: wa, p_name: name, p_room: room }),
+  async callByProvider(id) {
+    const { data, error } = await db.from("wa_calls").select("*").eq("provider_call_id", id).maybeSingle();
+    if (error) throw new Error(error.message);
+    return data ? { operatorId: data.operator_id, providerCallId: data.provider_call_id, phone: data.phone_e164, waId: data.wa_id, name: data.caller_name,
+      status: data.status, handledBy: data.handled_by, endedAt: data.ended_at, conversationId: data.conversation_id } : null;
+  },
+  callNote: async (id, note, callback) => { await rpc("wa_call_bot_note", { p_call_id: id, p_note: note, p_callback: callback }); },
 };
 
 const DESK_ROLES = ["admin", "dispatcher", "agent"];
@@ -105,6 +118,12 @@ const ai = env("AI_API_KEY")
 const deps: ServiceDeps = {
   db: waDb, store, sender, ai, log, templates, statusTokenSecret: STATUS_SECRET, publicAppUrl: PUBLIC_APP_URL,
   calls: configured() ? graphCalls(env("WHATSAPP_PHONE_NUMBER_ID"), env("WHATSAPP_ACCESS_TOKEN")) : undefined,
+  voiceBot: configured() && env("LIVEKIT_URL") && env("LIVEKIT_API_KEY") && env("LIVEKIT_API_SECRET")
+    ? liveKitVoiceBot({ url: env("LIVEKIT_URL"), apiKey: env("LIVEKIT_API_KEY"), apiSecret: env("LIVEKIT_API_SECRET"),
+        phoneNumberId: env("WHATSAPP_PHONE_NUMBER_ID"), waToken: env("WHATSAPP_ACCESS_TOKEN") })
+    : undefined,
+  voiceSecret: env("VOICE_TOKEN_SECRET") || `voice:${KEY}`,
+  voiceToolUrl: `${SUPABASE_URL.replace(/\/$/, "")}/functions/v1/whatsapp/voice-tool`,
   async config() {
     const c = await store.loadConfig(SLUG);
     if (!c) throw new Error("operator_not_configured");
@@ -138,6 +157,25 @@ Deno.serve(async (req) => {
     const r = await processOutbox(deps);
     if (r.sent || r.failed) log({ level: "info", outbox: r });
     return json(200, r);
+  }
+
+  // --- Voice bot tools (called by the LiveKit agent with the per-call token)
+  if (path.endsWith("/voice-tool")) {
+    const body = await req.json().catch(() => ({}));
+    const cfg = await deps.config();
+    const r = await voiceTool({
+      cfg, store, now: new Date(), secret: deps.voiceSecret!, statusTokenSecret: STATUS_SECRET, publicAppUrl: PUBLIC_APP_URL,
+      call: (id) => waDb.callByProvider(id),
+      bookingsForPhone: (phone) => waDb.bookingsForPhone(cfg.operatorId, phone),
+      note: (id, note, cb) => waDb.callNote(id, note, cb),
+      async sendWhatsApp(call: VoiceCall, m) {
+        if (!configured() || !call.conversationId) return false;
+        const sent = await sendAndRecord(deps, call.conversationId, call.waId, m);
+        return !sent.error;
+      },
+    }, body ?? {});
+    if (r.status >= 400) log({ level: "warn", voiceTool: r.status, action: body?.action });
+    return json(r.status, r.body);
   }
 
   // --- WhatsApp voice call actions from the booking desk

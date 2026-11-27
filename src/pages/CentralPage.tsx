@@ -5,7 +5,7 @@ import { Link } from "react-router-dom";
 import { Badge, Button, Logo } from "../components/ui";
 import { CallPanel, useCalls } from "../components/CallPanel";
 import { WhatsAppInbox } from "../components/WhatsAppInbox";
-import { backend, CommandError, type DeskMethod, type DeskMode, type DispatchRow, type StaffSession, type WaCall } from "../lib/backend";
+import { backend, CommandError, type CallMode, type DeskMethod, type DeskMode, type DispatchRow, type StaffSession, type WaCall } from "../lib/backend";
 import { cx, fmtDateTime, fmtTime, formatMoney } from "../lib/format";
 import { LocaleContext, makeT } from "../lib/i18n";
 import BookingPage from "./BookingPage";
@@ -13,7 +13,7 @@ import { StaffLogin } from "./DispatchPage";
 
 const SOURCE: Record<string, { label: string; tone: string }> = {
   web: { label: "Web", tone: "held" }, whatsapp: { label: "WhatsApp", tone: "confirmed" }, staff: { label: "Staff", tone: "neutral" },
-  phone: { label: "Llamada", tone: "warn" }, voice: { label: "Voz", tone: "neutral" },
+  phone: { label: "Llamada", tone: "warn" }, voice: { label: "🤖 Voz", tone: "held" },
 };
 const STATE: Record<string, string> = { requested: "Solicitada", needs_driver: "Sin chofer", held: "Reservada", confirmed: "Confirmada", closed: "Cerrada", cancelled: "Cancelada" };
 const METHOD: Record<DeskMethod, { label: string; icon: string; help: string }> = {
@@ -44,6 +44,7 @@ type Tab = "incoming" | "whatsapp" | "calls" | "new";
 function Central({ session, onSignOut }: { session: StaffSession; onSignOut: () => void }) {
   const [tab, setTab] = useState<Tab>("incoming");
   const [mode, setMode] = useState<DeskMode>("auto");
+  const [callMode, setCallModeState] = useState<{ mode: CallMode; voiceId: string | null }>({ mode: "desk", voiceId: null });
   const [rows, setRows] = useState<DispatchRow[]>([]);
   const [waPending, setWaPending] = useState(0);
   const [err, setErr] = useState<string | null>(null);
@@ -56,8 +57,8 @@ function Central({ session, onSignOut }: { session: StaffSession; onSignOut: () 
 
   const load = useCallback(async () => {
     try {
-      const [m, r] = await Promise.all([backend.deskMode(), backend.deskRows()]);
-      setMode(m); setRows(r); setErr(null);
+      const [m, r, c] = await Promise.all([backend.deskMode(), backend.deskRows(), backend.callMode()]);
+      setMode(m); setRows(r); setCallModeState(c); setErr(null);
     } catch (e) { setErr((e as Error).message); }
   }, []);
   useEffect(() => { load(); }, [load]);
@@ -78,7 +79,14 @@ function Central({ session, onSignOut }: { session: StaffSession; onSignOut: () 
 
   const held = useMemo(() => rows.filter((r) => r.deskHold && r.state !== "cancelled"), [rows]);
   const recent = useMemo(() => rows.filter((r) => !r.deskHold), [rows]);
-  const missed = calls.filter((c) => c.status === "missed" && Date.now() - new Date(c.startedAt).getTime() < 6 * 3600_000).length;
+  const missed = calls.filter((c) => (c.status === "missed" && Date.now() - new Date(c.startedAt).getTime() < 6 * 3600_000) || (c.wantsCallback && !c.callbackDoneAt)).length;
+  async function switchCalls(m: CallMode, voiceId?: string | null) {
+    try {
+      await backend.setCallMode(m, voiceId);
+      setCallModeState((c) => ({ mode: m, voiceId: voiceId ?? c.voiceId }));
+      setFlash(m === "bot" ? "Las llamadas de WhatsApp las atiende Sofía (bot de voz). Si no está disponible, suenan acá." : "Las llamadas de WhatsApp suenan en la Central.");
+    } catch (e) { setErr(e instanceof CommandError ? ERR[e.code] ?? e.message : (e as Error).message); }
+  }
 
   async function switchMode(m: DeskMode) {
     try { await backend.setDeskMode(m); setMode(m); setFlash(m === "manual" ? "Modo manual: las reservas nuevas esperan acá hasta que las envíes." : "Modo automático: las reservas nuevas pasan directo a despacho."); }
@@ -119,6 +127,17 @@ function Central({ session, onSignOut }: { session: StaffSession; onSignOut: () 
                   <button key={m} role="radio" aria-checked={mode === m} onClick={() => mode !== m && switchMode(m)}
                     className={cx("rounded-md px-3 py-1 text-xs font-semibold", mode === m ? (m === "auto" ? "bg-emerald-600 text-white" : "bg-cab-500 text-ink-950") : "text-ink-400 hover:text-white")}>
                     {m === "auto" ? "Auto" : "Manual"}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="flex items-center gap-2" title="Quién atiende las llamadas de WhatsApp">
+              <span className="text-xs text-ink-400">Llamadas</span>
+              <div className="flex rounded-lg bg-ink-900 p-1" role="radiogroup" aria-label="Quién atiende" data-testid="call-mode">
+                {(["desk", "bot"] as const).map((m) => (
+                  <button key={m} role="radio" aria-checked={callMode.mode === m} onClick={() => callMode.mode !== m && switchCalls(m)}
+                    className={cx("rounded-md px-3 py-1 text-xs font-semibold", callMode.mode === m ? (m === "bot" ? "bg-sky-600 text-white" : "bg-emerald-600 text-white") : "text-ink-400 hover:text-white")}>
+                    {m === "bot" ? "🤖 Bot" : "👤 Central"}
                   </button>
                 ))}
               </div>
@@ -210,7 +229,9 @@ function Central({ session, onSignOut }: { session: StaffSession; onSignOut: () 
 
         {tab === "whatsapp" && <WhatsAppInbox key={chatId ?? "all"} initialConversationId={chatId} onCount={setWaPending} onOpenBooking={() => setTab("incoming")} />}
 
-        {tab === "calls" && <CallsLog calls={calls} onBook={startBooking} />}
+        {tab === "calls" && <CallsLog calls={calls} onBook={startBooking} callMode={callMode} onVoice={(v) => switchCalls(callMode.mode, v)}
+          onDone={async (c) => { await backend.callbackDone(c.id).catch(() => {}); reloadCalls(); }}
+          onChat={(c) => { setChatId(c.conversationId); setTab("whatsapp"); }} />}
 
         {tab === "new" && newFor && (
           <div className="mx-auto max-w-3xl">
@@ -232,32 +253,80 @@ function Central({ session, onSignOut }: { session: StaffSession; onSignOut: () 
   );
 }
 
-function CallsLog({ calls, onBook }: { calls: WaCall[]; onBook: (c: WaCall) => void }) {
+function CallsLog({ calls, onBook, callMode, onVoice, onDone, onChat }: {
+  calls: WaCall[]; onBook: (c: WaCall) => void; callMode: { mode: CallMode; voiceId: string | null };
+  onVoice: (voiceId: string) => void; onDone: (c: WaCall) => void; onChat: (c: WaCall) => void;
+}) {
   const ST: Record<string, [string, string]> = {
     ringing: ["Sonando", "warn"], answering: ["Conectando", "warn"], active: ["En curso", "confirmed"], ended: ["Atendida", "neutral"],
     missed: ["Perdida", "cancelled"], rejected: ["Rechazada", "cancelled"], failed: ["Falló", "cancelled"],
   };
+  const pending = calls.filter((c) => c.wantsCallback && !c.callbackDoneAt);
+  const [voice, setVoice] = useState(callMode.voiceId ?? "");
   return (
-    <div className="overflow-x-auto rounded-2xl border border-ink-800">
-      <table className="w-full min-w-[720px] text-sm" data-testid="calls-log">
-        <thead className="bg-ink-900 text-left text-xs uppercase tracking-wide text-ink-400">
-          <tr>{["Hora", "Cliente", "Estado", "Duración", "Reserva", ""].map((h) => <th key={h} className="px-3 py-2 font-medium">{h}</th>)}</tr>
-        </thead>
-        <tbody>
-          {calls.length === 0 && <tr><td colSpan={6} className="px-3 py-6 text-center text-ink-400">Sin llamadas en las últimas 24 h.</td></tr>}
-          {calls.map((c) => (
-            <tr key={c.id} className="border-t border-ink-800">
-              <td className="px-3 py-2 tabular-nums">{fmtTime(c.startedAt)}</td>
-              <td className="px-3 py-2">{c.name || "—"}<div className="text-xs text-ink-400"><a href={`https://wa.me/${c.waId}`} target="_blank" rel="noreferrer" className="hover:text-white">{c.phone}</a></div></td>
-              <td className="px-3 py-2"><Badge tone={ST[c.status]?.[1]}>{ST[c.status]?.[0] ?? c.status}</Badge></td>
-              <td className="px-3 py-2 tabular-nums">{c.durationS !== null ? `${Math.floor(c.durationS / 60)}:${String(c.durationS % 60).padStart(2, "0")}` : "—"}</td>
-              <td className="px-3 py-2 font-mono">{c.bookingRef ?? "—"}</td>
-              <td className="px-3 py-2 text-right">{!c.bookingRef && <Button variant="outline" className="py-1 text-xs" onClick={() => onBook(c)}>+ Reserva</Button>}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <p className="border-t border-ink-800 px-3 py-2 text-xs text-ink-400">Las llamadas perdidas se devuelven por WhatsApp desde el teléfono o escribiéndole al cliente en la pestaña WhatsApp.</p>
+    <div className="space-y-4">
+      <div className="rounded-2xl border border-ink-800 bg-ink-900 p-4 text-sm">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="font-semibold">{callMode.mode === "bot" ? "🤖 Atiende Sofía, el bot de voz" : "👤 Las llamadas suenan en la Central"}</span>
+          <span className="text-ink-400">{callMode.mode === "bot"
+            ? "Cotiza, reserva, informa el estado de las reservas y responde dudas. Lo que no puede resolver te lo deja abajo para devolver la llamada."
+            : "Cambiá a 🤖 Bot arriba a la derecha para que Sofía atienda las llamadas."}</span>
+        </div>
+        <form className="mt-3 flex flex-wrap items-center gap-2" onSubmit={(e) => { e.preventDefault(); if (voice.trim()) onVoice(voice.trim()); }}>
+          <label className="text-xs text-ink-400" htmlFor="fish-voice">Voz de Fish Audio (ID)</label>
+          <input id="fish-voice" value={voice} onChange={(e) => setVoice(e.target.value)} placeholder="por defecto: voz estándar de Fish"
+            className="w-80 rounded-lg border border-ink-700 bg-ink-950 px-2 py-1 font-mono text-xs text-white" pattern="[A-Za-z0-9_\-]{8,64}" />
+          <Button variant="outline" className="py-1 text-xs" type="submit" disabled={!voice.trim() || voice.trim() === callMode.voiceId}>Guardar voz</Button>
+        </form>
+      </div>
+
+      {pending.length > 0 && (
+        <section data-testid="callbacks">
+          <h2 className="mb-2 text-lg font-semibold">Para devolver la llamada · {pending.length}</h2>
+          <div className="grid gap-3 lg:grid-cols-2">
+            {pending.map((c) => (
+              <article key={c.id} className="rounded-2xl border border-red-500/30 bg-ink-900 p-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-semibold text-white">{c.name || c.phone}</span>
+                  <a href={`https://wa.me/${c.waId}`} target="_blank" rel="noreferrer" className="text-xs text-ink-400 hover:text-white">{c.phone}</a>
+                  {c.handledBy === "bot" && <Badge tone="held">🤖 Sofía</Badge>}
+                  <span className="ml-auto text-xs text-ink-400">{fmtTime(c.startedAt)}</span>
+                </div>
+                {c.botNote && <p className="mt-2 whitespace-pre-line text-sm text-amber-100">{c.botNote}</p>}
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {c.conversationId && <Button variant="outline" className="py-1 text-xs" onClick={() => onChat(c)}>Escribir por WhatsApp</Button>}
+                  <Button variant="outline" className="py-1 text-xs" onClick={() => onBook(c)}>+ Reserva</Button>
+                  <Button className="py-1 text-xs" onClick={() => onDone(c)}>Listo, ya lo contactamos</Button>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
+
+      <div className="overflow-x-auto rounded-2xl border border-ink-800">
+        <table className="w-full min-w-[820px] text-sm" data-testid="calls-log">
+          <thead className="bg-ink-900 text-left text-xs uppercase tracking-wide text-ink-400">
+            <tr>{["Hora", "Cliente", "Atendió", "Estado", "Duración", "Reserva", ""].map((h) => <th key={h} className="px-3 py-2 font-medium">{h}</th>)}</tr>
+          </thead>
+          <tbody>
+            {calls.length === 0 && <tr><td colSpan={7} className="px-3 py-6 text-center text-ink-400">Sin llamadas en las últimas 24 h.</td></tr>}
+            {calls.map((c) => (
+              <tr key={c.id} className="border-t border-ink-800 align-top">
+                <td className="px-3 py-2 tabular-nums">{fmtTime(c.startedAt)}</td>
+                <td className="px-3 py-2">{c.name || "—"}<div className="text-xs text-ink-400"><a href={`https://wa.me/${c.waId}`} target="_blank" rel="noreferrer" className="hover:text-white">{c.phone}</a></div>
+                  {c.botNote && <div className="mt-1 max-w-xs text-xs text-amber-200">📝 {c.botNote}</div>}</td>
+                <td className="px-3 py-2">{c.handledBy === "bot" ? "🤖 Sofía" : "👤 Central"}</td>
+                <td className="px-3 py-2"><Badge tone={ST[c.status]?.[1]}>{ST[c.status]?.[0] ?? c.status}</Badge></td>
+                <td className="px-3 py-2 tabular-nums">{c.durationS !== null ? `${Math.floor(c.durationS / 60)}:${String(c.durationS % 60).padStart(2, "0")}` : "—"}</td>
+                <td className="px-3 py-2 font-mono">{c.bookingRef ?? "—"}</td>
+                <td className="px-3 py-2 text-right">{!c.bookingRef && <Button variant="outline" className="py-1 text-xs" onClick={() => onBook(c)}>+ Reserva</Button>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="border-t border-ink-800 px-3 py-2 text-xs text-ink-400">Las reservas que toma Sofía aparecen en Entrantes con canal «Voz» y el cliente recibe el detalle por WhatsApp.</p>
+      </div>
     </div>
   );
 }

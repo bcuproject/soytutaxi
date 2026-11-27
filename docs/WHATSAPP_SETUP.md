@@ -105,6 +105,34 @@ inbox and can create bookings. They can't assign drivers or cancel in Despacho. 
   - **📋 Bolsa:** listed on the drivers' job board; urgent jobs are still offered automatically.
   - **👤 Manual:** stays in Despacho for a dispatcher to assign.
 
+## 7. Voice bot "Sofía" (Fish Audio) for WhatsApp calls
+
+With **Llamadas → 🤖 Bot** in the Central, WhatsApp calls are answered by Sofía, a voice assistant. It runs on the BCU
+LiveKit server (the same worker and Fish Audio account as the Sweet Spot trial). Sofía speaks Rioplatense Spanish and
+switches to English if the caller does. She can:
+
+- quote any EZE/AEP ↔ city trip with the real fare engine, read it back and, after a clear yes, register the booking;
+- tell callers the status of their bookings;
+- answer questions from the operator's own rules: meeting points, notice, cancellation, waiting time, payment, vehicles.
+
+Anything else (changes, cancellations, complaints, special requests, "a person please") becomes a **Para devolver la
+llamada** card in the Llamadas tab, with her one-line note. Bookings she takes show channel **🤖 Voz**, and the caller
+gets the reference and status link on WhatsApp. If the bot can't be reached, the call rings the Central instead.
+
+Setup (once):
+1. **Supabase secrets** for the `whatsapp` function: `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`. Use the
+   **same LiveKit project the BCU server's `bcu-livekit` worker uses** (the values already set in the BCU Supabase
+   project). The same three secrets also switch on the walkie-talkie.
+2. **BCU server:** `soytutaxi_voice_agent.py` sits next to `agent.py` in `/opt/bcu-livekit`. A guarded hook in
+   `agent.py` sends only `bcu_assistant=soytutaxi` calls to it, and every other line is unchanged. `bcu-livekit.service`
+   needs one restart to load it. It reuses the server's existing `FISH_AUDIO_API_KEY` and `OPENAI_API_KEY`.
+3. **Voice:** paste a Fish Audio voice ID (a Spanish, ideally Argentine, voice from fish.audio) in **Llamadas → Voz de
+   Fish Audio**. Without one, Fish's default voice is used.
+4. Turn on **🤖 Bot** and call the WhatsApp number from a test phone.
+
+Optional server environment: `SOYTUTAXI_FISH_VOICE` (default voice), `SOYTUTAXI_FISH_MODEL` (default `s2.1-pro`),
+`SOYTUTAXI_LLM_MODEL` (default `gpt-4.1-mini`), `SOYTUTAXI_STT_MODEL` (default `gpt-4o-transcribe`).
+
 ## Moving to the real number later
 
 Register the live SoyTuTaxi number in the same Meta app, then replace `WHATSAPP_PHONE_NUMBER_ID` and
