@@ -9,7 +9,7 @@ import type {
   Vehicle, BookingSource, AssignmentState, TripStage,
 } from "../domain/types.ts";
 import {
-  ApiError, type Actor, type BookingStatusView, type CreateBookingArgs, type CreateBookingResult, type QuoteRow, type Store,
+  ApiError, type Actor, type BookingStatusView, type CancelTerms, type CreateBookingArgs, type CreateBookingResult, type QuoteRow, type Store,
 } from "./store.ts";
 
 interface MemQuote extends QuoteRow {
@@ -215,9 +215,46 @@ export class MemoryStore implements Store {
       amountMinor: b.amountMinor, currency: b.currency, paymentMode: b.paymentMode, collectionState: b.collectionState,
       locale: b.contact.locale,
       driverAssigned: this.assignments.some((s) => s.bookingId === b.id && s.state === "confirmed"),
-      allowedActions: b.state === "cancelled" || b.state === "closed" ? [] : ["contact_staff", "request_change"],
+      allowedActions: b.state === "closed" ? (this.ratings.has(b.id) ? [] : ["rate"])
+        : b.state === "cancelled" ? [] : this.terms(b).allowed ? ["contact_staff", "request_change", "cancel"] : ["contact_staff", "request_change"],
+      rating: this.ratings.get(b.id) ?? null,
       createdAt: b.createdAt,
     };
+  }
+
+  private ratings = new Map<string, number>();
+  private terms(b: MemBooking): CancelTerms {
+    const cfg = this.cfg.policy.config.cancellation;
+    const ms = new Date(b.journey.pickupAt).getTime() - this.clock().getTime();
+    const s = this.assignments.find((x) => x.bookingId === b.id && x.state !== "released");
+    const reason = b.state === "cancelled" || b.state === "closed" ? `already_${b.state}` : ms <= 0 ? "trip_started"
+      : s && s.tripStage && s.tripStage !== "scheduled" ? "driver_on_the_way" : null;
+    const pct = ms >= cfg.free_until_hours_before * 3600_000 ? 100 : cfg.refund_percent_after;
+    const paid = b.collectionState === "collected" && b.paymentMode === "prepaid" ? b.amountMinor ?? 0 : 0;
+    return { allowed: !reason, reason, refundPercent: pct, freeUntilHoursBefore: cfg.free_until_hours_before,
+      freeUntil: new Date(new Date(b.journey.pickupAt).getTime() - cfg.free_until_hours_before * 3600_000).toISOString(),
+      paidMinor: paid, refundMinor: Math.floor((paid * pct) / 100), currency: b.currency, reference: b.reference, pickupAt: b.journey.pickupAt, paymentMode: b.paymentMode };
+  }
+  private byToken(reference: string, tokenHash: string) {
+    const b = [...this.bookings.values()].find((x) => x.reference === reference && x.statusTokenHash === tokenHash);
+    if (!b) throw new ApiError(404, "booking_not_found");
+    return b;
+  }
+  async cancelTerms(reference: string, tokenHash: string) { return this.terms(this.byToken(reference, tokenHash)); }
+  async cancelBooking(reference: string, tokenHash: string) {
+    const b = this.byToken(reference, tokenHash);
+    const t = this.terms(b);
+    if (!t.allowed) throw new ApiError(409, t.reason!);
+    for (const s of this.assignments) if (s.bookingId === b.id && s.state !== "released") s.state = "released";
+    b.state = "cancelled";
+    return { ...t, cancelled: true as const };
+  }
+  async rateBooking(reference: string, tokenHash: string, score: number) {
+    const b = this.byToken(reference, tokenHash);
+    if (b.state !== "closed") throw new ApiError(409, "not_completed");
+    if (!Number.isInteger(score) || score < 1 || score > 5) throw new ApiError(422, "invalid_score");
+    this.ratings.set(b.id, score);
+    return { score };
   }
 
   async resolveActor(bearer: string) {

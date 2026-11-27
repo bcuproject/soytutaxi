@@ -8,7 +8,7 @@ import { zonesContaining } from "../domain/geo.ts";
 import { computeQuote } from "../domain/quote.ts";
 import { addDaysLocal, addMinutes, utcToLocalDate } from "../domain/time.ts";
 import type { Direction, Locale, OperatorConfig, PaymentMode, VehicleOption } from "../domain/types.ts";
-import { ApiError, type Store } from "../api/store.ts";
+import { ApiError, type CancelTerms, type Store } from "../api/store.ts";
 import type { Extractor } from "./ai.ts";
 import { say } from "./copy.ts";
 import type { InboundMessage, Outbound } from "./meta.ts";
@@ -19,7 +19,7 @@ import {
 
 export type Step =
   | "menu" | "direction" | "airport" | "zone" | "address" | "date" | "date_pick" | "time" | "flight"
-  | "passengers" | "bags" | "carry" | "review" | "change" | "vehicle" | "name" | "payment" | "done" | "handoff";
+  | "passengers" | "bags" | "carry" | "review" | "change" | "vehicle" | "name" | "payment" | "done" | "handoff" | "rate_comment";
 
 export interface Draft {
   direction?: Direction;
@@ -44,6 +44,9 @@ export interface Draft {
   lastRef?: string;
   lastUrl?: string;
   staffNotified?: boolean;
+  /** Booking waiting for a comment after a low rating. */
+  rateBooking?: string;
+  rateScore?: number;
 }
 
 export interface ConversationState {
@@ -71,6 +74,9 @@ export interface EngineDeps {
   publicAppUrl: string;
   bookingsForPhone(phone: string): Promise<BookingSummary[]>;
   driverRespond?(driverId: string, offerId: string, accept: boolean): Promise<{ outcome: string; reference?: string }>;
+  /** Passenger self-service; confirm=false returns the terms only. */
+  cancelBooking?(phone: string, reference: string, confirm: boolean): Promise<CancelTerms & { cancelled?: boolean }>;
+  rate?(phone: string, bookingId: string, score: number, comment: string | null): Promise<{ score: number }>;
 }
 
 export interface EngineResult {
@@ -147,6 +153,15 @@ class Turn {
     // Language switch
     if (/^(en|english|ingles)$/.test(plain) || this.id === "lang:en") { this.locale = "en"; return this.resume(); }
     if (/^(es|espanol|castellano)$/.test(plain) || this.id === "lang:es") { this.locale = "es-AR"; return this.resume(); }
+
+    // Ratings and self-service cancellation
+    const rm = /^rate:([0-9a-f-]{36}):([1-5])$/.exec(this.id);
+    if (rm && this.deps.rate) return this.rate(rm[1], +rm[2], null);
+    if (this.step === "rate_comment" && this.text && this.draft.rateBooking && this.deps.rate && !wantsStaff(this.text)) {
+      return this.rate(this.draft.rateBooking, this.draft.rateScore ?? 1, this.text);
+    }
+    const cm = /^bk:(cancel|cancelok|keep):([A-Z0-9-]{4,20})$/.exec(this.id);
+    if (cm && this.deps.cancelBooking) return this.selfCancel(cm[2], cm[1]);
 
     // Global commands
     if (this.id === "menu:staff" || this.id === "review:staff" || (this.text && wantsStaff(this.text))) return this.handoff("staffOn");
@@ -237,7 +252,55 @@ class Turn {
       });
     }));
     this.textOut(`${this.t("bookingsHeader")}\n\n${lines.join("\n\n")}`);
+    const open = list.filter((b) => !["cancelled", "closed"].includes(b.state)).slice(0, 3);
+    if (this.deps.cancelBooking && open.length) {
+      this.replies.push({ type: "buttons", text: this.t("menuShort"),
+        buttons: open.map((b) => ({ id: `bk:cancel:${b.reference}`, title: this.t("btnCancelRef", { ref: b.reference }) })) });
+    }
     if (this.step !== "handoff") this.step = "done";
+  }
+
+  private money(minor: number, currency: string | null) {
+    return currency ? formatMoney(minor, currency, this.locale) : String(minor);
+  }
+
+  private async selfCancel(reference: string, action: string) {
+    this.step = "done";
+    if (action === "keep") { this.textOut(this.t("cancelKept")); return; }
+    try {
+      const t = await this.deps.cancelBooking!(this.phone, reference, action === "cancelok");
+      if (!t.allowed && !t.cancelled) {
+        this.textOut(this.t("cancelRefused", { ref: reference, why: this.t(`why_${t.reason}` as never) || String(t.reason) }));
+        return;
+      }
+      if (t.cancelled) {
+        this.textOut(t.refundMinor > 0 ? this.t("cancelDoneRefund", { ref: reference, amount: this.money(t.refundMinor, t.currency) })
+          : this.t("cancelDone", { ref: reference }));
+        return;
+      }
+      const hours = t.freeUntilHoursBefore;
+      const refund = t.paidMinor <= 0 ? (t.refundPercent === 100 || t.paymentMode !== "prepaid" ? this.t("cancelFree") : this.t("cancelNoRefund", { hours }))
+        : t.refundMinor <= 0 ? this.t("cancelNoRefund", { hours })
+        : t.refundPercent === 100 ? this.t("cancelRefundFull", { amount: this.money(t.refundMinor, t.currency) })
+        : this.t("cancelRefundPart", { hours, pct: t.refundPercent, amount: this.money(t.refundMinor, t.currency) });
+      this.replies.push({ type: "buttons", text: this.t("cancelAsk", { ref: reference, when: this.when(t.pickupAt), refund }),
+        buttons: [{ id: `bk:cancelok:${reference}`, title: this.t("btnCancelYes") }, { id: `bk:keep:${reference}`, title: this.t("btnCancelNo") }] });
+    } catch (e) {
+      const code = e instanceof ApiError ? e.code : "error";
+      this.textOut(this.t("cancelRefused", { ref: reference, why: this.t(`why_${code}` as never) || code }));
+    }
+  }
+
+  private async rate(bookingId: string, score: number, comment: string | null) {
+    try {
+      await this.deps.rate!(this.phone, bookingId, score, comment);
+      if (comment) { this.textOut(this.t("rateCommentThanks")); this.step = "done"; delete this.draft.rateBooking; delete this.draft.rateScore; }
+      else if (score <= 2) { this.textOut(this.t("rateAskComment")); this.step = "rate_comment"; this.draft.rateBooking = bookingId; this.draft.rateScore = score; }
+      else { this.textOut(this.t("rateThanks")); this.step = "done"; }
+    } catch (e) {
+      this.textOut(this.t("rateError", { reason: e instanceof ApiError ? e.code : "error" }));
+      this.step = "done"; delete this.draft.rateBooking;
+    }
   }
 
   // ------------------------------------------------------------------------------- understanding

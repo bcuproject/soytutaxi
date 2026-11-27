@@ -8,7 +8,7 @@ import { formatMoney } from "../domain/fare.ts";
 import { computeQuote } from "../domain/quote.ts";
 import { addMinutes, utcToLocalDate } from "../domain/time.ts";
 import type { Direction, Locale, OperatorConfig, PaymentMode } from "../domain/types.ts";
-import { ApiError, type Store } from "../api/store.ts";
+import { ApiError, type CancelTerms, type Store } from "../api/store.ts";
 import type { BookingSummary } from "./engine.ts";
 import type { Outbound } from "./meta.ts";
 
@@ -97,6 +97,8 @@ export interface VoiceDeps {
   call(providerCallId: string): Promise<VoiceCall | null>;
   bookingsForPhone(phone: string): Promise<BookingSummary[]>;
   note(providerCallId: string, note: string, callback: boolean): Promise<void>;
+  /** Cancellation for the caller's own number; confirm=false returns the terms only. */
+  cancel?(phone: string, reference: string, confirm: boolean): Promise<CancelTerms & { cancelled?: boolean }>;
   /** WhatsApp message to the caller (within the 24 h window the call opened). */
   sendWhatsApp(call: VoiceCall, m: Outbound): Promise<boolean>;
 }
@@ -258,6 +260,41 @@ export async function voiceTool(deps: VoiceDeps, input: Record<string, unknown>)
       return { status: 200, body: { bookings: list.map((b) => ({ reference: b.reference, spoken: spellReference(b.reference),
         state: (ST[b.state] ?? [b.state, b.state])[lang === "en" ? 1 : 0], pickup: when(b.pickupAt, cfg.timezone, lang),
         route: b.direction === "from_airport" ? `${b.airport} → ${b.zone ?? ""}` : `${b.zone ?? ""} → ${b.airport}` })) } };
+    }
+
+    case "cancel": {
+      if (!deps.cancel) return { status: 200, body: { ok: false, say: L("No puedo cancelar por teléfono; ofrecé que lo llame una persona.", "I can't cancel by phone; offer a callback.") } };
+      const reference = str(args.reference, 20).toUpperCase().replace(/\s+/g, "");
+      if (!/^[A-Z0-9-]{4,20}$/.test(reference)) return { status: 200, body: { ok: false, say: L("Pedí el código de la reserva.", "Ask for the booking reference.") } };
+      const confirm = args.confirm === true;
+      const why: Record<string, [string, string]> = {
+        driver_on_the_way: ["el chofer ya está en camino", "the driver is already on the way"], trip_started: ["el viaje ya empezó", "the trip has started"],
+        already_cancelled: ["ya estaba cancelada", "it was already cancelled"], already_closed: ["el viaje ya terminó", "the trip has finished"],
+        booking_not_found: ["no hay una reserva con ese código para este número", "there's no booking with that reference for this number"],
+      };
+      const money = (n: number, c: string | null) => (c ? formatMoney(n, c, lang) : String(n));
+      try {
+        const t = await deps.cancel(call.phone, reference, confirm);
+        if (t.cancelled) {
+          return { status: 200, body: { ok: true, cancelled: true, refund: t.refundMinor > 0 ? money(t.refundMinor, t.currency) : null,
+            say: t.refundMinor > 0 ? L(`Listo, quedó cancelada. El reembolso de ${money(t.refundMinor, t.currency)} se procesa solo.`, `Done, it's cancelled. The ${money(t.refundMinor, t.currency)} refund is processed automatically.`)
+              : L("Listo, quedó cancelada.", "Done, it's cancelled.") } };
+        }
+        if (!t.allowed) {
+          const w = (why[t.reason ?? ""] ?? [String(t.reason), String(t.reason)])[lang === "en" ? 1 : 0];
+          return { status: 200, body: { ok: false, say: L(`No se puede cancelar por acá: ${w}. Ofrecé que lo llame una persona.`, `It can't be cancelled here: ${w}. Offer a callback.`) } };
+        }
+        const refund = t.paidMinor <= 0 ? L("sin cargo", "no charge")
+          : t.refundMinor > 0 ? L(`se devuelve ${money(t.refundMinor, t.currency)} (${t.refundPercent}%)`, `${money(t.refundMinor, t.currency)} is refunded (${t.refundPercent}%)`)
+          : L(`no hay reembolso porque faltan menos de ${t.freeUntilHoursBefore} horas`, `no refund, as it's less than ${t.freeUntilHoursBefore} hours before`);
+        return { status: 200, body: { ok: true, needsConfirm: true, pickup: when(t.pickupAt, cfg.timezone, lang), refund,
+          say: L(`Confirmá con el cliente: cancelar ${spellReference(reference)} del ${when(t.pickupAt, cfg.timezone, lang)}; ${refund}. Si dice que sí, llamá de nuevo con confirm=true.`,
+                 `Confirm with the caller: cancel ${spellReference(reference)} on ${when(t.pickupAt, cfg.timezone, lang)}; ${refund}. If yes, call again with confirm=true.`) } };
+      } catch (e) {
+        if (!(e instanceof ApiError)) throw e;
+        const w = (why[e.code] ?? [e.code, e.code])[lang === "en" ? 1 : 0];
+        return { status: 200, body: { ok: false, say: L(`No se pudo cancelar: ${w}.`, `It couldn't be cancelled: ${w}.`) } };
+      }
     }
 
     case "note": {

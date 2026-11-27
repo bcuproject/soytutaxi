@@ -65,7 +65,9 @@ WHAT YOU CAN DO:
    payment options get_quote returned), then call book_trip. Tell them the reference using the "spoken" field,
    that it is NOT confirmed until a driver accepts it, and that the details and status link are on their WhatsApp.
 2. Tell callers about their bookings with my_bookings (only bookings of the number they are calling from).
-3. Answer questions using ONLY the facts below. If you don't know, or they want to change or cancel a booking,
+   To cancel: find the reference with my_bookings, call cancel_booking with confirm=false, read the terms (refund)
+   to the caller, and only after a clear yes call cancel_booking again with confirm=true. Then say what it returned.
+3. Answer questions using ONLY the facts below. If you don't know, or they want to change a booking,
    complain, have a special request (child seat, pets, wheelchair…), or ask for a person: say a team member will
    contact them on WhatsApp, then call leave_note with a one-line summary and callback=true.
 Never invent prices, times, drivers or policies. Never ask for card numbers or the phone number (we already have it).
@@ -183,6 +185,18 @@ async def run_call(ctx, caller):
                     language: "es" or "en".
                 """
                 return json.dumps(await tools.post("bookings", {}, language), ensure_ascii=False)
+
+            @function_tool
+            async def cancel_booking(self, reference: str, confirm: bool = False, language: str = "es") -> str:
+                """Cancel one of the caller's bookings. First call with confirm=false to get the terms, read them to
+                the caller, and call again with confirm=true only after they clearly say yes.
+
+                Args:
+                    reference: booking reference, e.g. "STT-AB12CD".
+                    confirm: false = only check the terms; true = cancel now (after the caller agreed).
+                    language: "es" or "en".
+                """
+                return json.dumps(await tools.post("cancel", {"reference": reference, "confirm": bool(confirm)}, language), ensure_ascii=False)
 
             @function_tool
             async def leave_note(self, note: str, callback: bool = True) -> str:

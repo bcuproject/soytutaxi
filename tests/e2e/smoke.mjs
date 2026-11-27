@@ -57,6 +57,11 @@ await clickText("button", "View booking status");
 await page.waitForFunction(() => document.body.innerText.toLowerCase().includes("finding a driver") && document.body.innerText.toLowerCase().includes("meeting point"));
 assert(true, "status page shows awaiting driver + meeting point");
 await page.screenshot({ path: `${SHOTS}/4-status.png`, fullPage: true });
+await page.click('[data-testid="cancel-open"]');
+await page.waitForSelector('[data-testid="cancel-box"]');
+assert(await page.$eval('[data-testid="cancel-box"]', (e) => /no charge/i.test(e.innerText)), "self-service cancel shows the policy terms");
+await clickText("button", "Keep it");
+await page.waitForSelector('[data-testid="cancel-open"]');
 
 // Dispatch (client-side navigation keeps the in-memory demo store)
 await page.evaluate(() => { history.pushState({}, "", "/despacho"); dispatchEvent(new PopStateEvent("popstate")); });

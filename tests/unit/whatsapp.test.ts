@@ -277,3 +277,61 @@ describe("Meta webhook format", () => {
     expect(l.interactive.action.sections[0].rows[0].title.length).toBeLessThanOrEqual(24);
   });
 });
+
+describe("WhatsApp self-service — cancel and rate", () => {
+  const terms = (over: Record<string, unknown> = {}) => ({
+    allowed: true, reason: null, refundPercent: 100, freeUntilHoursBefore: 24, freeUntil: NOW.toISOString(), paidMinor: 5000000,
+    refundMinor: 5000000, currency: "ARS", reference: "STT-AB12CD", pickupAt: "2026-11-29T15:00:00Z", paymentMode: "prepaid", ...over,
+  });
+
+  it("lists bookings with a cancel button, asks for confirmation with the refund, then cancels", async () => {
+    const calls: [string, string, boolean][] = [];
+    deps.bookingsForPhone = async () => [{ reference: "STT-AB12CD", state: "confirmed", pickupAt: "2026-11-29T15:00:00Z", direction: "from_airport", airport: "EZE", zone: "Palermo", idempotencyKey: "k".repeat(20) }];
+    deps.cancelBooking = async (phone, ref, ok) => { calls.push([phone, ref, ok]); return ok ? { ...terms(), cancelled: true } : terms(); };
+    const list = await send({ reply: "menu:check" });
+    expect(ids(list)).toContain("bk:cancel:STT-AB12CD");
+    const ask = await send({ reply: "bk:cancel:STT-AB12CD" });
+    expect(all(ask)).toMatch(/total pagado/);
+    expect(ids(ask)).toEqual(["bk:cancelok:STT-AB12CD", "bk:keep:STT-AB12CD"]);
+    const done = await send({ reply: "bk:cancelok:STT-AB12CD" });
+    expect(all(done)).toMatch(/cancelamos la reserva \*STT-AB12CD\*.*reembolso/s);
+    expect(calls).toEqual([["+447700900123", "STT-AB12CD", false], ["+447700900123", "STT-AB12CD", true]]);
+  });
+
+  it("explains a refusal and keeps the booking on 'No'", async () => {
+    deps.cancelBooking = async () => terms({ allowed: false, reason: "driver_on_the_way" });
+    expect(all(await send({ reply: "bk:cancel:STT-AB12CD" }))).toMatch(/chofer ya está en camino/);
+    expect(all(await send({ reply: "bk:keep:STT-AB12CD" }))).toMatch(/sigue en pie/);
+  });
+
+  it("a low rating asks for a comment and saves it", async () => {
+    const saved: unknown[] = [];
+    deps.rate = async (_p, id, n, c) => { saved.push([id, n, c]); return { score: n }; };
+    const id = "0b5c1a3e-1111-4222-8333-444455556666";
+    expect(all(await send({ reply: `rate:${id}:5` }))).toMatch(/Gracias por tu calificación/);
+    expect(all(await send({ reply: `rate:${id}:1` }))).toMatch(/qué pasó/);
+    expect(conv.step).toBe("rate_comment");
+    expect(all(await send("El auto estaba sucio"))).toMatch(/Gracias por contarnos/);
+    expect(saved).toEqual([[id, 5, null], [id, 1, null], [id, 1, "El auto estaba sucio"]]);
+    expect(conv.step).toBe("done");
+  });
+});
+
+describe("Reminder and rating notifications", () => {
+  it("composes the reminder (confirmed only) and the rating list", async () => {
+    const { composeNotification } = await import("@shared/whatsapp/notify.ts");
+    const ctx = {
+      bookingId: "0b5c1a3e-1111-4222-8333-444455556666", reference: "STT-AB12CD", state: "confirmed", source: "whatsapp", direction: "from_airport" as const,
+      airport: "EZE", zone: "Palermo", pickupAt: "2026-11-28T15:00:00Z", flight: "AR1303", passengers: 2, largeBags: 2, amountMinor: 5000000, currency: "ARS",
+      idempotencyKey: "k".repeat(20), operatorId: cfg.operatorId,
+      passenger: { name: "Emma", phone: "+447700900123", locale: "en", lastInboundAt: NOW.toISOString() },
+      driver: { id: "d", name: "Carlos Gómez", phone: null, verified: true, plate: "AB123CD", vehicle: "Toyota Corolla", lastInboundAt: null }, offer: null,
+    };
+    const opts = { now: NOW, timezone: cfg.timezone, publicAppUrl: "https://x.test", statusTokenSecret: "s", templates: {} };
+    const r = await composeNotification("notify.passenger.reminder", ctx, opts);
+    expect(r.send && r.message.type === "text" && r.message.text).toMatch(/Reminder.*Carlos.*AB123CD/s);
+    expect((await composeNotification("notify.passenger.reminder", { ...ctx, state: "cancelled" }, opts)).send).toBe(false);
+    const rt = await composeNotification("notify.passenger.rating", { ...ctx, state: "closed" }, opts);
+    expect(rt.send && rt.message.type === "list" && rt.message.rows.map((x) => x.id)).toEqual([5, 4, 3, 2, 1].map((n) => `rate:${ctx.bookingId}:${n}`));
+  });
+});

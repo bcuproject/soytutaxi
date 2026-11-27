@@ -77,6 +77,7 @@ export interface BookingStatusView {
   locale: string;
   driverAssigned: boolean;
   allowedActions: string[];
+  rating?: number | null;
   createdAt: string;
 }
 
@@ -89,6 +90,15 @@ export interface Store {
   insertQuote(row: QuoteRow): Promise<{ id: string }>;
   createBooking(args: CreateBookingArgs): Promise<CreateBookingResult>;
   getBookingStatus(reference: string, statusTokenHash: string): Promise<BookingStatusView | null>;
+  /** Passenger self-service (status-link token). */
+  cancelTerms(reference: string, statusTokenHash: string): Promise<CancelTerms>;
+  cancelBooking(reference: string, statusTokenHash: string, reason: string | null): Promise<CancelTerms & { cancelled: true }>;
+  rateBooking(reference: string, statusTokenHash: string, score: number, comment: string | null): Promise<{ score: number }>;
   /** Resolve a bearer token to a staff actor for the operator, or null. */
   resolveActor(bearer: string, operatorId: string): Promise<Actor | null>;
+}
+
+export interface CancelTerms {
+  allowed: boolean; reason: string | null; refundPercent: number; freeUntilHoursBefore: number; freeUntil: string;
+  paidMinor: number; refundMinor: number; currency: string | null; reference: string; pickupAt: string; paymentMode: string;
 }

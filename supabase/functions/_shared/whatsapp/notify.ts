@@ -92,6 +92,25 @@ export async function composeNotification(
       }
       break;
     }
+    case "notify.passenger.reminder":
+    case "notify.passenger.rating": {
+      locale = ctx.passenger.locale === "en" ? "en" : "es-AR";
+      to = digits(ctx.passenger.phone); lastInbound = ctx.passenger.lastInboundAt;
+      if (kind.endsWith("reminder")) {
+        if (ctx.state !== "confirmed") return { send: false, reason: "state_changed", final: true };
+        const token = await deriveStatusToken(opts.statusTokenSecret, ctx.operatorId, ctx.idempotencyKey);
+        const url = `${app}/reserva/${ctx.reference}?t=${token}`;
+        const driver = ctx.driver ? say(locale, "nReminderDriver", { driver: ctx.driver.name.split(" ")[0], vehicle: ctx.driver.vehicle, plate: ctx.driver.plate }) : "";
+        message = { type: "text", text: say(locale, "nReminder", { ref: ctx.reference, route: route(locale), when: when(ctx.pickupAt, locale), driver, url }) };
+        params = [ctx.reference, when(ctx.pickupAt, locale), url];
+      } else {
+        if (ctx.state !== "closed") return { send: false, reason: "state_changed", final: true };
+        message = { type: "list", text: say(locale, "nRating", { ref: ctx.reference }), button: say(locale, "rateButton"),
+          rows: ([5, 4, 3, 2, 1] as const).map((n) => ({ id: `rate:${ctx.bookingId}:${n}`, title: say(locale, `rate_${n}`) })) };
+        params = [ctx.reference];
+      }
+      break;
+    }
     case "notify.driver.pickup_changed": {
       const d = ctx.driver;
       if (!d) return { send: false, reason: "no_driver", final: true };

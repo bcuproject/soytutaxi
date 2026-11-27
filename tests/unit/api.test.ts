@@ -137,6 +137,23 @@ describe("public API", () => {
     expect(noTok.status).toBe(404);
   });
 
+  it("passengers can preview and cancel with the status token; ratings need a finished trip", async () => {
+    const { b } = await quoteAndBook("key-cancel-00");
+    const h = { "x-status-token": b.body.statusToken };
+    const view = await call("GET", `/bookings/${b.body.reference}`, undefined, h);
+    expect(view.body.allowedActions).toContain("cancel");
+    const terms = await call("GET", `/bookings/${b.body.reference}/cancel`, undefined, h);
+    expect(terms.status).toBe(200);
+    expect(terms.body).toMatchObject({ allowed: true, paidMinor: 0 });
+    expect((await call("POST", `/bookings/${b.body.reference}/rating`, { score: 5 }, h)).body.error.code).toBe("not_completed");
+    expect((await call("POST", `/bookings/${b.body.reference}/cancel`, { reason: "x" }, { "x-status-token": "y".repeat(43) })).status).toBe(404);
+    const done = await call("POST", `/bookings/${b.body.reference}/cancel`, { reason: "Cambio de planes" }, h);
+    expect(done.status).toBe(200);
+    expect(done.body.cancelled).toBe(true);
+    expect((await call("GET", `/bookings/${b.body.reference}`, undefined, h)).body).toMatchObject({ bookingState: "cancelled", allowedActions: [] });
+    expect((await call("POST", `/bookings/${b.body.reference}/cancel`, {}, h)).status).toBe(409);
+  });
+
   it("only dispatchers may book airport pickups without a flight", async () => {
     const q = await call("POST", "/quotes", { ...journey, flightDesignator: null });
     expect(q.status).toBe(422);

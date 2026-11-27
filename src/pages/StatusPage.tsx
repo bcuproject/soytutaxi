@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import type { BookingStatusView } from "@shared/api/store.ts";
+import type { BookingStatusView, CancelTerms } from "@shared/api/store.ts";
 import type { NormalizedJourney } from "@shared/domain/types.ts";
 import { Badge, Button } from "../components/ui";
 import { backend } from "../lib/backend";
@@ -89,6 +89,10 @@ export default function StatusPage() {
           </div>
         )}
 
+        {view.allowedActions.includes("rate") || view.rating ? <RateBox view={view} token={sp.get("t") ?? ""} locale={locale} onDone={() => setTick((x) => x + 1)} /> : null}
+
+        {view.allowedActions.includes("cancel") && <CancelBox view={view} token={sp.get("t") ?? ""} locale={locale} onDone={() => setTick((x) => x + 1)} />}
+
         {view.allowedActions.includes("contact_staff") && (
           <a href={`https://wa.me/5491163692528?text=${encodeURIComponent(view.reference)}`} target="_blank" rel="noreferrer"
             className="mt-6 block text-center text-sm text-cab-400 hover:text-cab-500">{t("status.help")} →</a>
@@ -127,6 +131,93 @@ function PayNow({ view, token, returned, locale }: { view: BookingStatusView; to
         {busy ? "…" : en ? "Pay with Mercado Pago" : "Pagar con Mercado Pago"}
       </button>
       {err && <p className="mt-2 text-xs text-red-300" role="alert">{err}</p>}
+    </div>
+  );
+}
+
+type Done = { view: BookingStatusView; token: string; locale: string; onDone: () => void };
+const statusPath = (ref: string, tail: string) => `/bookings/${encodeURIComponent(ref)}/${tail}`;
+
+function CancelBox({ view, token, locale, onDone }: Done) {
+  const en = locale === "en";
+  const [terms, setTerms] = useState<CancelTerms | null>(null);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const hdr = { "x-status-token": token };
+  const money = (n: number, c: string | null) => (c ? formatMoney(n, c, locale) : String(n));
+  const WHY: Record<string, [string, string]> = {
+    driver_on_the_way: ["El chofer ya está en camino: escribinos por WhatsApp.", "The driver is already on the way: message us on WhatsApp."],
+    trip_started: ["El viaje ya empezó.", "The trip has already started."],
+  };
+  const fail = (e: unknown) => { const c = (e as { code?: string }).code ?? "error"; setMsg((WHY[c] ?? ["No pudimos cancelar. Escribinos por WhatsApp.", "We couldn't cancel. Message us on WhatsApp."])[en ? 1 : 0]); setBusy(false); };
+
+  if (!terms) {
+    return (
+      <button data-testid="cancel-open" disabled={busy} onClick={async () => {
+        setBusy(true); setMsg(null);
+        try { setTerms(await backend.api<CancelTerms>("GET", statusPath(view.reference, "cancel"), undefined, hdr)); setBusy(false); } catch (e) { fail(e); }
+      }} className="mt-6 w-full rounded-xl border border-red-500/40 px-4 py-3 text-sm font-medium text-red-300 hover:bg-red-500/10 disabled:opacity-50">
+        {busy ? "…" : en ? "Cancel this booking" : "Cancelar esta reserva"}
+        {msg && <span className="mt-1 block text-xs" role="alert">{msg}</span>}
+      </button>
+    );
+  }
+  const refund = terms.paidMinor <= 0
+    ? (en ? "There's no charge." : "Es sin cargo.")
+    : terms.refundMinor > 0
+      ? terms.refundPercent === 100 ? (en ? `We refund the full ${money(terms.refundMinor, terms.currency)}.` : `Te devolvemos el total: ${money(terms.refundMinor, terms.currency)}.`)
+        : (en ? `Under the policy (less than ${terms.freeUntilHoursBefore} h before) we refund ${terms.refundPercent}%: ${money(terms.refundMinor, terms.currency)}.`
+              : `Según la política (menos de ${terms.freeUntilHoursBefore} h antes) te devolvemos el ${terms.refundPercent}%: ${money(terms.refundMinor, terms.currency)}.`)
+      : (en ? `Less than ${terms.freeUntilHoursBefore} h before pickup: no refund under the policy.` : `Faltan menos de ${terms.freeUntilHoursBefore} h: según la política no hay reembolso.`);
+  return (
+    <div className="mt-6 rounded-xl border border-red-500/40 bg-red-500/5 p-4 text-sm" data-testid="cancel-box">
+      {!terms.allowed ? <p className="text-red-300">{(WHY[terms.reason ?? ""] ?? ["No se puede cancelar online.", "It can't be cancelled online."])[en ? 1 : 0]}</p> : <>
+        <p className="font-medium text-white">{en ? "Cancel this booking?" : "¿Cancelar esta reserva?"}</p>
+        <p className="mt-1 text-ink-300">{refund}</p>
+        <input value={reason} onChange={(e) => setReason(e.target.value)} maxLength={300}
+          placeholder={en ? "Reason (optional)" : "Motivo (opcional)"} className="mt-3 w-full rounded-lg border border-ink-700 bg-ink-800 px-3 py-2 text-sm" />
+        <div className="mt-3 flex gap-2">
+          <button onClick={() => setTerms(null)} className="flex-1 rounded-lg border border-ink-600 px-3 py-2 text-ink-200">{en ? "Keep it" : "Mantener"}</button>
+          <button data-testid="cancel-confirm" disabled={busy} onClick={async () => {
+            setBusy(true);
+            try { await backend.api("POST", statusPath(view.reference, "cancel"), { reason }, hdr); onDone(); } catch (e) { fail(e); }
+          }} className="flex-1 rounded-lg bg-red-500 px-3 py-2 font-semibold text-white hover:bg-red-400 disabled:opacity-50">{busy ? "…" : en ? "Yes, cancel" : "Sí, cancelar"}</button>
+        </div>
+        {msg && <p className="mt-2 text-xs text-red-300" role="alert">{msg}</p>}
+      </>}
+    </div>
+  );
+}
+
+function RateBox({ view, token, locale, onDone }: Done) {
+  const en = locale === "en";
+  const [score, setScore] = useState<number>(view.rating ?? 0);
+  const [comment, setComment] = useState("");
+  const [sent, setSent] = useState(!!view.rating);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(false);
+  if (sent) return <p className="mt-6 rounded-xl bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300" data-testid="rated">{"★".repeat(score)} {en ? "Thanks for your rating!" : "¡Gracias por tu calificación!"}</p>;
+  return (
+    <div className="mt-6 rounded-xl border border-ink-700 p-4 text-sm" data-testid="rate-box">
+      <p className="font-medium text-white">{en ? "How was your trip?" : "¿Cómo estuvo tu viaje?"}</p>
+      <div className="mt-2 flex gap-1" role="radiogroup">
+        {[1, 2, 3, 4, 5].map((n) => (
+          <button key={n} role="radio" aria-checked={score === n} aria-label={`${n}`} onClick={() => setScore(n)}
+            className={`text-3xl ${n <= score ? "text-cab-400" : "text-ink-600"}`}>★</button>
+        ))}
+      </div>
+      {score > 0 && <>
+        <textarea value={comment} onChange={(e) => setComment(e.target.value)} maxLength={1000} rows={2}
+          placeholder={score <= 2 ? (en ? "What went wrong?" : "¿Qué pasó?") : (en ? "Comment (optional)" : "Comentario (opcional)")}
+          className="mt-2 w-full rounded-lg border border-ink-700 bg-ink-800 px-3 py-2" />
+        <button data-testid="rate-send" disabled={busy} onClick={async () => {
+          setBusy(true); setErr(false);
+          try { await backend.api("POST", `/bookings/${encodeURIComponent(view.reference)}/rating`, { score, comment }, { "x-status-token": token }); setSent(true); onDone(); }
+          catch { setErr(true); } finally { setBusy(false); }
+        }} className="mt-2 w-full rounded-lg bg-cab-500 px-3 py-2 font-semibold text-ink-950 disabled:opacity-50">{busy ? "…" : en ? "Send" : "Enviar"}</button>
+        {err && <p className="mt-2 text-xs text-red-300" role="alert">{en ? "Couldn't save. Try again." : "No se pudo guardar. Probá de nuevo."}</p>}
+      </>}
     </div>
   );
 }

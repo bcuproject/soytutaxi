@@ -83,7 +83,7 @@ class Session(unittest.IsolatedAsyncioTestCase):
             await stt.run_call(SimpleNamespace(room=room), caller)
 
         names = sorted(t["function"]["name"] for t in captured)
-        self.assertEqual(names, ["book_trip", "end_call", "get_quote", "leave_note", "my_bookings"])
+        self.assertEqual(names, ["book_trip", "cancel_booking", "end_call", "get_quote", "leave_note", "my_bookings"])
         for t in captured:
             self.assertIs(t["function"]["parameters"].get("additionalProperties"), False)
         self.assertTrue(said and said[0].startswith("¡Hola Ana!"))

@@ -2,7 +2,7 @@
 // conversation state with optimistic locking, staff takeover, replies) and the notification outbox.
 
 import type { OperatorConfig } from "../domain/types.ts";
-import type { Store } from "../api/store.ts";
+import type { CancelTerms, Store } from "../api/store.ts";
 import type { Extractor } from "./ai.ts";
 import { handleMessage, type BookingSummary, type ConversationState, type Draft, type Step } from "./engine.ts";
 import { previewOf, type CallApi, type InboundMessage, type Outbound, type ParsedWebhook, type Sender, type StatusUpdate } from "./meta.ts";
@@ -33,6 +33,8 @@ export interface WaDb {
   inboxDone(eventKey: string): Promise<void>;
   bookingsForPhone(operatorId: string, phone: string): Promise<BookingSummary[]>;
   driverRespond(driverId: string, offerId: string, accept: boolean): Promise<{ outcome: string; reference?: string }>;
+  passengerCancel?(operatorId: string, phone: string, reference: string, confirm: boolean, via: "whatsapp" | "voice"): Promise<CancelTerms & { cancelled?: boolean }>;
+  rate?(operatorId: string, phone: string, bookingId: string, score: number, comment: string | null): Promise<{ score: number }>;
   outboxClaim(limit: number): Promise<OutboxJob[]>;
   outboxFinish(jobId: string, ok: boolean, error: string | null, final: boolean): Promise<void>;
   notificationContext(kind: string, payload: Record<string, unknown>): Promise<NotificationContext | null>;
@@ -136,6 +138,8 @@ async function handleOne(msg: InboundMessage, cfg: OperatorConfig, deps: Service
       cfg, now, store: deps.store, ai: deps.ai ?? null, statusTokenSecret: deps.statusTokenSecret, publicAppUrl: deps.publicAppUrl,
       bookingsForPhone: (phone) => deps.db.bookingsForPhone(cfg.operatorId, phone),
       driverRespond: (d, o, a) => deps.db.driverRespond(d, o, a),
+      cancelBooking: deps.db.passengerCancel ? (phone, ref, ok) => deps.db.passengerCancel!(cfg.operatorId, phone, ref, ok, "whatsapp") : undefined,
+      rate: deps.db.rate ? (phone, id, n, c) => deps.db.rate!(cfg.operatorId, phone, id, n, c) : undefined,
     });
     const saved = await deps.db.saveConversation(row.id, row.version, r.step, r.draft, r.locale, r.bookingId ?? null, r.needsStaff ? true : null);
     if (saved === null) continue;    // another message for this chat was processed meanwhile → redo with fresh state

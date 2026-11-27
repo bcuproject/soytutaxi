@@ -277,6 +277,24 @@ export async function handle(req: Request, ctx: HandlerContext): Promise<Respons
     }
     const m = /^\/bookings\/([A-Za-z0-9-]+)$/.exec(path);
     if (req.method === "GET" && m) return json(200, await getBooking(req, ctx, m[1].toUpperCase(), url), headers);
+    const sm = /^\/bookings\/([A-Za-z0-9-]+)\/(cancel|rating)$/.exec(path);
+    if (sm) {
+      const reference = sm[1].toUpperCase();
+      const token = req.headers.get("x-status-token") ?? "";
+      if (!REF_RE.test(reference) || token.length < 20) throw new ApiError(404, "booking_not_found");
+      const hash = await sha256Hex(token);
+      if (sm[2] === "cancel" && req.method === "GET") return json(200, await ctx.store.cancelTerms(reference, hash), headers);
+      if (sm[2] === "cancel" && req.method === "POST") {
+        const body = await readJson(req);
+        const reason = typeof body.reason === "string" ? body.reason.trim().slice(0, 300) || null : null;
+        return json(200, await ctx.store.cancelBooking(reference, hash, reason), headers);
+      }
+      if (sm[2] === "rating" && req.method === "POST") {
+        const body = await readJson(req);
+        const comment = typeof body.comment === "string" ? body.comment.trim().slice(0, 1000) || null : null;
+        return json(200, await ctx.store.rateBooking(reference, hash, Number(body.score), comment), headers);
+      }
+    }
 
     throw new ApiError(404, "not_found");
   } catch (e) {

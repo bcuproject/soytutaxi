@@ -75,6 +75,16 @@ export class PgStore implements Store {
     return this.asService(async (c) => (await c.query("select get_booking_status($1,$2) as r", [reference, hash])).rows[0].r);
   }
 
+  cancelTerms(reference: string, hash: string) {
+    return this.asService(async (c) => (await c.query("select passenger_cancel_preview($1,$2) as r", [reference, hash])).rows[0].r);
+  }
+  cancelBooking(reference: string, hash: string, reason: string | null) {
+    return this.asService(async (c) => (await c.query("select passenger_cancel($1,$2,$3) as r", [reference, hash, reason])).rows[0].r);
+  }
+  rateBooking(reference: string, hash: string, score: number, comment: string | null) {
+    return this.asService(async (c) => (await c.query("select passenger_rate($1,$2,$3,$4) as r", [reference, hash, score, comment])).rows[0].r);
+  }
+
   /** Tests use bearer "user:<uuid>" to stand in for a verified Supabase JWT. */
   async resolveActor(bearer: string, operatorId: string): Promise<Actor | null> {
     const m = /^user:(.+)$/.exec(bearer);

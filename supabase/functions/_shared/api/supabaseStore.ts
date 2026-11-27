@@ -90,6 +90,24 @@ export class SupabaseStore implements Store {
     return (data ?? null) as BookingStatusView | null;
   }
 
+  async cancelTerms(reference: string, tokenHash: string) {
+    const { data, error } = await this.db.rpc("passenger_cancel_preview", { p_reference: reference, p_token_hash: tokenHash });
+    if (error) throw mapPgError(error);
+    return data;
+  }
+
+  async cancelBooking(reference: string, tokenHash: string, reason: string | null) {
+    const { data, error } = await this.db.rpc("passenger_cancel", { p_reference: reference, p_token_hash: tokenHash, p_reason: reason });
+    if (error) throw mapPgError(error);
+    return data;
+  }
+
+  async rateBooking(reference: string, tokenHash: string, score: number, comment: string | null) {
+    const { data, error } = await this.db.rpc("passenger_rate", { p_reference: reference, p_token_hash: tokenHash, p_score: score, p_comment: comment });
+    if (error) throw mapPgError(error);
+    return data;
+  }
+
   async resolveActor(bearer: string, operatorId: string): Promise<Actor | null> {
     const { data, error } = await this.db.auth.getUser(bearer);
     if (error || !data?.user) return null; // anon key or expired token → public caller

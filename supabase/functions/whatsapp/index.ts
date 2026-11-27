@@ -70,6 +70,8 @@ const waDb: WaDb = {
   inboxDone: (key) => rpc("wa_inbox_done", { p_event_key: key }),
   bookingsForPhone: (op, phone) => rpc("wa_bookings_for_phone", { p_operator: op, p_phone: phone }),
   driverRespond: (d, o, a) => rpc("wa_driver_respond", { p_driver: d, p_offer: o, p_accept: a }),
+  passengerCancel: (op, phone, ref, ok, via) => rpc("wa_passenger_cancel", { p_operator: op, p_phone: phone, p_reference: ref, p_confirm: ok, p_via: via }),
+  rate: (op, phone, id, n, c) => rpc("wa_rate", { p_operator: op, p_phone: phone, p_booking: id, p_score: n, p_comment: c }),
   outboxClaim: (limit) => rpc("wa_outbox_claim", { p_limit: limit }),
   outboxFinish: (job, ok, error, final) => rpc("wa_outbox_finish", { p_job: job, p_ok: ok, p_error: error, p_final: final }),
   notificationContext: (kind, payload) => rpc<NotificationContext | null>("wa_notification_context", { p_kind: kind, p_payload: payload }),
@@ -168,6 +170,7 @@ Deno.serve(async (req) => {
       call: (id) => waDb.callByProvider(id),
       bookingsForPhone: (phone) => waDb.bookingsForPhone(cfg.operatorId, phone),
       note: (id, note, cb) => waDb.callNote(id, note, cb),
+      cancel: (phone, ref, ok) => waDb.passengerCancel!(cfg.operatorId, phone, ref, ok, "voice"),
       async sendWhatsApp(call: VoiceCall, m) {
         if (!configured() || !call.conversationId) return false;
         const sent = await sendAndRecord(deps, call.conversationId, call.waId, m);

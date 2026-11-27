@@ -39,6 +39,8 @@ const waDb: WaDb = {
   inboxDone: (key) => rpc("wa_inbox_done", { p_event_key: key }),
   bookingsForPhone: (op, phone) => rpc("wa_bookings_for_phone", { p_operator: op, p_phone: phone }),
   driverRespond: (d, o, a) => rpc("wa_driver_respond", { p_driver: d, p_offer: o, p_accept: a }),
+  passengerCancel: (op, phone, ref, ok, via) => rpc("wa_passenger_cancel", { p_operator: op, p_phone: phone, p_reference: ref, p_confirm: ok, p_via: via }),
+  rate: (op, phone, id, n, c) => rpc("wa_rate", { p_operator: op, p_phone: phone, p_booking: id, p_score: n, p_comment: c }),
   outboxClaim: async (limit) => q("select * from public.wa_outbox_claim(p_limit => $1)", [limit]),
   outboxFinish: (job, ok, error, final) => rpc("wa_outbox_finish", { p_job: job, p_ok: ok, p_error: error, p_final: final }),
   notificationContext: (kind, payload) => rpc("wa_notification_context", { p_kind: kind, p_payload: payload }),
@@ -113,8 +115,8 @@ describe("WhatsApp webhook → booking (database)", () => {
     const before = sent.length;
     expect(await processWebhook(h, deps)).toEqual({ handled: 1, skipped: 0 });
     expect(await processWebhook(h, deps)).toEqual({ handled: 0, skipped: 1 });
-    expect(sent.length).toBe(before + 1);
-    expect(lastText()).toContain("STT-");
+    expect(sent.length).toBe(before + 2);              // the list + a "Cancel STT-…" button (open booking)
+    expect(JSON.stringify(sent.slice(-2))).toContain("bk:cancel:STT-");
   });
 
   it("delivery receipts never move a message backwards", async () => {
