@@ -46,6 +46,8 @@ export interface WaCall {
   phone: string; waId: string; name: string | null; offerSdp: string | null; answeredBy: string | null; answeredByMe: boolean;
   startedAt: string; connectedAt: string | null; endedAt: string | null; durationS: number | null; bookingRef: string | null; conversationId: string | null;
   handledBy: "desk" | "bot"; wantsCallback: boolean; botNote: string | null; callbackDoneAt: string | null;
+  /** Sofía asked for a person: a desk agent can take over the call live. */
+  transferRequestedAt?: string | null; transferReason?: string | null; transferTakenAt?: string | null; transferTakenByMe?: boolean; transferFailedAt?: string | null;
 }
 export type CallMode = "desk" | "bot";
 
@@ -137,6 +139,13 @@ export interface Backend {
   financeSettle(driverId: string, note: string): Promise<void>;
   driverStatement(batchId?: string | null): Promise<DriverStatement>;
   report(from: string, to: string): Promise<Report>;
+  joinTransfer(callId: string): Promise<{ url: string; token: string }>;
+  accounts(): Promise<Account[]>;
+  saveAccount(a: Partial<Account> & { name: string }): Promise<string>;
+  setBookingAccount(bookingId: string, version: number, accountId: string | null, ref?: string | null): Promise<void>;
+  generateInvoice(accountId: string, month: string): Promise<string[]>;
+  setInvoiceState(invoiceId: string, state: "issued" | "paid" | "void"): Promise<void>;
+  invoice(invoiceId: string): Promise<InvoiceDoc>;
   /** Demo only: make a fake WhatsApp call ring. */
   simulateCall?(): void;
 }
@@ -161,6 +170,20 @@ export interface Report {
   refunds: { currency: string; amountMinor: number }[]; ratings: { count: number; average: number | null; low: number };
   daily: { day: string; bookings: number; completed: number }[]; topZones: { zone: string; bookings: number }[];
   drivers: { driverId: string; fullName: string; trips: number; earningsMinor: number; currency: string | null; rating: number | null; ratings: number; noShows: number }[];
+}
+
+export interface AccountInvoice { id: string; number: string; periodStart: string; periodEnd: string; currency: string; totalMinor: number; state: "draft" | "issued" | "paid" | "void"; dueOn: string | null; overdue: boolean }
+export interface Account {
+  id: string; name: string; kind: "hotel" | "agency" | "company"; taxId: string | null; email: string | null; phone: string | null; address: string | null;
+  discountPercent: number; paymentTermsDays: number; active: boolean; notes: string | null;
+  unbilled: { currency: string; amountMinor: number; trips: number }[]; upcoming: number;
+  outstanding: { currency: string; amountMinor: number }[]; invoices: AccountInvoice[];
+}
+export interface InvoiceDoc {
+  id: string; number: string; periodStart: string; periodEnd: string; currency: string; subtotalMinor: number; discountMinor: number; totalMinor: number;
+  state: AccountInvoice["state"]; issuedAt: string | null; dueOn: string | null; paidAt: string | null; operator: string;
+  account: { name: string; taxId: string | null; email: string | null; address: string | null; discountPercent: number };
+  lines: { reference: string; pickupAt: string; description: string; amountMinor: number }[];
 }
 
 export interface BoardRow {
@@ -381,6 +404,10 @@ class DemoBackend implements Backend {
         answeredBy: null, answeredByMe: false, startedAt: new Date(t - 180_000).toISOString(), connectedAt: new Date(t - 178_000).toISOString(),
         endedAt: new Date(t).toISOString(), durationS: 178, bookingRef: null, conversationId: null, handledBy: "bot", wantsCallback: true,
         botNote: "Viaja con una silla de ruedas plegable y pregunta si entra en el auto.", callbackDoneAt: null });
+      this.calls.push({ id: crypto.randomUUID(), status: "active", phone: "+5491155550006", waId: "5491155550006", name: "Lucía Martín", offerSdp: null,
+        answeredBy: null, answeredByMe: false, startedAt: new Date(t - 60_000).toISOString(), connectedAt: new Date(t - 58_000).toISOString(), endedAt: null,
+        durationS: null, bookingRef: null, conversationId: null, handledBy: "bot", wantsCallback: false, botNote: null, callbackDoneAt: null,
+        transferRequestedAt: new Date(t - 2_000).toISOString(), transferReason: "Quiere cambiar la dirección de búsqueda de su reserva", transferTakenAt: null });
       this.notify("wa_calls");
       return;
     }
@@ -429,6 +456,49 @@ class DemoBackend implements Backend {
       revenue: [], driverCost: [], refunds: [], ratings: { count: 0, average: null, low: 0 }, daily: days,
       topZones: Object.entries(count((r) => r.zoneName ?? "—")).map(([zone, bookings]) => ({ zone, bookings })).sort((a, b) => b.bookings - a.bookings),
       drivers: [] };
+  }
+  async joinTransfer(): Promise<{ url: string; token: string }> { throw LIVE_ONLY(); }
+  private demoAccounts: Account[] = [
+    { id: "acc-1", name: "Hotel Alvear Palace (demo)", kind: "hotel", taxId: "30-12345678-9", email: "conserjeria@example.com", phone: null, address: "Av. Alvear 1891",
+      discountPercent: 10, paymentTermsDays: 30, active: true, notes: null, unbilled: [{ currency: "ARS", amountMinor: 18450000, trips: 6 }], upcoming: 2,
+      outstanding: [{ currency: "ARS", amountMinor: 9200000 }],
+      invoices: [{ id: "inv-1", number: "CTA-202610-0001", periodStart: "2026-10-01", periodEnd: "2026-10-31", currency: "ARS", totalMinor: 9200000, state: "issued", dueOn: "2026-12-05", overdue: false }] },
+    { id: "acc-2", name: "Viajes Patagonia (demo)", kind: "agency", taxId: null, email: "reservas@example.com", phone: null, address: null,
+      discountPercent: 0, paymentTermsDays: 15, active: true, notes: null, unbilled: [], upcoming: 0, outstanding: [], invoices: [] },
+  ];
+  async accounts() { return this.demoAccounts; }
+  async saveAccount(a: Partial<Account> & { name: string }) {
+    const ex = a.id ? this.demoAccounts.find((x) => x.id === a.id) : undefined;
+    if (ex) { Object.assign(ex, a); return ex.id; }
+    const id = `acc-${Date.now()}`;
+    this.demoAccounts.push({ kind: "hotel", taxId: null, email: null, phone: null, address: null, discountPercent: 0, paymentTermsDays: 30, active: true, notes: null,
+      unbilled: [], upcoming: 0, outstanding: [], invoices: [], ...a, id });
+    return id;
+  }
+  async setBookingAccount(): Promise<void> { throw LIVE_ONLY(); }
+  async generateInvoice(accountId: string, month: string) {
+    const a = this.demoAccounts.find((x) => x.id === accountId)!;
+    if (!a.unbilled.length) throw new CommandError("nothing_to_invoice");
+    const m = month.slice(0, 7).replace("-", "");
+    const total = Math.round(a.unbilled[0].amountMinor * (1 - a.discountPercent / 100));
+    a.invoices.unshift({ id: `inv-${Date.now()}`, number: `CTA-${m}-${String(a.invoices.length + 2).padStart(4, "0")}`, periodStart: `${month.slice(0, 7)}-01`,
+      periodEnd: `${month.slice(0, 7)}-28`, currency: "ARS", totalMinor: total, state: "draft", dueOn: null, overdue: false });
+    a.unbilled = [];
+    return [a.invoices[0].id];
+  }
+  async setInvoiceState(id: string, state: "issued" | "paid" | "void") {
+    for (const a of this.demoAccounts) {
+      const i = a.invoices.find((x) => x.id === id);
+      if (i) { i.state = state; if (state === "issued") i.dueOn = addDaysLocal(new Intl.DateTimeFormat("en-CA", { timeZone: "America/Argentina/Buenos_Aires" }).format(new Date()), a.paymentTermsDays); }
+    }
+  }
+  async invoice(id: string): Promise<InvoiceDoc> {
+    const a = this.demoAccounts.find((x) => x.invoices.some((i) => i.id === id))!;
+    const i = a.invoices.find((x) => x.id === id)!;
+    const sub = Math.round(i.totalMinor / (1 - a.discountPercent / 100));
+    return { ...i, subtotalMinor: sub, discountMinor: sub - i.totalMinor, issuedAt: null, paidAt: null, operator: "SoyTuTaxi (DEMO)",
+      account: { name: a.name, taxId: a.taxId, email: a.email, address: a.address, discountPercent: a.discountPercent },
+      lines: [{ reference: "STT-DEM201", pickupAt: `${i.periodStart}T13:00:00Z`, description: "EZE → Recoleta · Emma Wilson · Hab. 512", amountMinor: sub }] };
   }
   private listeners = new Set<(t: string) => void>();
   private notify(t: string) { for (const l of this.listeners) l(t); }
@@ -687,6 +757,8 @@ class SupabaseBackend implements Backend {
       answeredByMe: !!u?.user && r.answered_by === u.user.id, startedAt: r.started_at, connectedAt: r.connected_at, endedAt: r.ended_at,
       durationS: r.duration_s, bookingRef: r.bookings?.reference ?? null, conversationId: r.conversation_id,
       handledBy: r.handled_by ?? "desk", wantsCallback: !!r.wants_callback, botNote: r.bot_note ?? null, callbackDoneAt: r.callback_done_at ?? null,
+      transferRequestedAt: r.transfer_requested_at ?? null, transferReason: r.transfer_reason ?? null, transferTakenAt: r.transfer_taken_at ?? null,
+      transferTakenByMe: !!u?.user && r.transfer_taken_by === u.user.id, transferFailedAt: r.transfer_failed_at ?? null,
     }));
   }
   async callAction(callId: string, action: "accept" | "reject" | "terminate", sdp?: string) {
@@ -740,6 +812,28 @@ class SupabaseBackend implements Backend {
   async financeSettle(driverId: string, note: string) { await this.rpc("finance_settle", { p_driver: driverId, p_to: new Date().toISOString(), p_note: note }); }
   async driverStatement(batchId: string | null = null) { return this.rpc<DriverStatement>("driver_statement", { p_batch: batchId }); }
   async report(from: string, to: string) { return this.rpc<Report>("report_summary", { p_from: from, p_to: to }); }
+  async joinTransfer(callId: string) {
+    const { data } = await this.sb.auth.getSession();
+    if (!data.session) throw new CommandError("unauthenticated");
+    const res = await fetch(`${this.url}/functions/v1/whatsapp/call-join`, {
+      method: "POST", headers: { apikey: this.anonKey, authorization: `Bearer ${data.session.access_token}`, "content-type": "application/json" },
+      body: JSON.stringify({ callId }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new CommandError(body?.error?.code ?? "call_error", body?.error?.message);
+    return body as { url: string; token: string };
+  }
+  async accounts() { return this.rpc<Account[]>("finance_accounts"); }
+  async saveAccount(a: Partial<Account> & { name: string }) {
+    return this.rpc<string>("admin_save_account", { p_id: a.id ?? null, p_name: a.name, p_kind: a.kind ?? "hotel", p_tax_id: a.taxId ?? null, p_email: a.email ?? null,
+      p_phone: a.phone ?? null, p_address: a.address ?? null, p_discount: a.discountPercent ?? 0, p_terms: a.paymentTermsDays ?? 30, p_active: a.active ?? true, p_notes: a.notes ?? null });
+  }
+  async setBookingAccount(bookingId: string, version: number, accountId: string | null, ref: string | null = null) {
+    await this.rpc("dispatch_set_account", { p_booking: bookingId, p_expected_version: version, p_account: accountId, p_ref: ref });
+  }
+  async generateInvoice(accountId: string, month: string) { return this.rpc<string[]>("finance_invoice_generate", { p_account: accountId, p_month: month }); }
+  async setInvoiceState(id: string, state: "issued" | "paid" | "void") { await this.rpc("finance_invoice_state", { p_invoice: id, p_state: state }); }
+  async invoice(id: string) { return this.rpc<InvoiceDoc>("finance_invoice", { p_invoice: id }); }
   async payCheckout(reference: string, token: string) {
     const res = await fetch(`${this.url}/functions/v1/payments/checkout`, {
       method: "POST", headers: { apikey: this.anonKey, "content-type": "application/json" }, body: JSON.stringify({ reference, token }),

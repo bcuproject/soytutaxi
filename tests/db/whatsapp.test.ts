@@ -39,6 +39,8 @@ const waDb: WaDb = {
   inboxDone: (key) => rpc("wa_inbox_done", { p_event_key: key }),
   bookingsForPhone: (op, phone) => rpc("wa_bookings_for_phone", { p_operator: op, p_phone: phone }),
   driverRespond: (d, o, a) => rpc("wa_driver_respond", { p_driver: d, p_offer: o, p_accept: a }),
+  callTransferRequest: (id, reason) => rpc("wa_call_transfer_request", { p_call_id: id, p_reason: reason }),
+  callTransferFailed: (id) => rpc("wa_call_transfer_failed", { p_call_id: id }),
   passengerCancel: (op, phone, ref, ok, via) => rpc("wa_passenger_cancel", { p_operator: op, p_phone: phone, p_reference: ref, p_confirm: ok, p_via: via }),
   rate: (op, phone, id, n, c) => rpc("wa_rate", { p_operator: op, p_phone: phone, p_booking: id, p_score: n, p_comment: c }),
   outboxClaim: async (limit) => q("select * from public.wa_outbox_claim(p_limit => $1)", [limit]),
@@ -299,6 +301,8 @@ describe("Voice bot (database)", () => {
       cfg: (await store.loadConfig("soytutaxi"))!, store, now: new Date(), secret: "voice-secret", statusTokenSecret: "s", publicAppUrl: "https://example.test",
       call: (id) => waDb.callByProvider(id), bookingsForPhone: (p) => waDb.bookingsForPhone(DEMO_OPERATOR_ID, p),
       note: (id, n, cb) => waDb.callNote(id, n, cb),
+      transfer: (id, r) => waDb.callTransferRequest!(id, r), transferFailed: (id) => waDb.callTransferFailed!(id),
+      cancel: (phone, ref, ok) => waDb.passengerCancel!(DEMO_OPERATOR_ID, phone, ref, ok, "voice"),
       sendWhatsApp: async (c, m) => { sent.push({ to: c.waId, m }); return true; },
     }, { callId: "wacid.V1", token: await voiceToken("voice-secret", "wacid.V1"), action, args, ...extra });
   });
@@ -351,6 +355,16 @@ describe("Voice bot (database)", () => {
     expect(sent.length).toBe(before);
 
     expect((await tool("bookings")).body.bookings[0]).toMatchObject({ reference: booked.body.reference, state: "buscando chofer" });
+    // Cancel by voice: terms first, then confirmed.
+    const terms = await tool("cancel", { reference: booked.body.reference, confirm: false });
+    expect(terms.body).toMatchObject({ ok: true, needsConfirm: true });
+    expect((await tool("cancel", { reference: booked.body.reference, confirm: true })).body).toMatchObject({ ok: true, cancelled: true });
+    expect((await tool("cancel", { reference: "STT-ZZZZZZ", confirm: true })).body.ok).toBe(false);
+    // Transfer to a person, then it times out → callback request.
+    expect((await tool("transfer", { reason: "Quiere hablar con alguien" })).body).toMatchObject({ ok: true, waitSeconds: 45 });
+    await tool("transfer_failed");
+    expect((await q("select wants_callback, transfer_failed_at is not null f from wa_calls where provider_call_id = 'wacid.V1'"))[0]).toEqual({ wants_callback: true, f: true });
+    await q("update wa_calls set wants_callback = false, bot_note = null where provider_call_id = 'wacid.V1'");
     await tool("note", { note: "Quiere saber si hay sillita para bebé", callback: true });
     expect((await q("select wants_callback, bot_note from wa_calls where provider_call_id = 'wacid.V1'"))[0]).toEqual({ wants_callback: true, bot_note: "Quiere saber si hay sillita para bebé" });
   });

@@ -47,6 +47,9 @@ export interface WaDb {
   callBotStarted(operatorId: string, callId: string, waId: string, name: string | null, room: string): Promise<string | null>;
   callByProvider(providerCallId: string): Promise<VoiceCall | null>;
   callNote(providerCallId: string, note: string, callback: boolean): Promise<void>;
+  callTransferRequest?(providerCallId: string, reason: string): Promise<{ ok: boolean }>;
+  callTransferFailed?(providerCallId: string): Promise<void>;
+  callTransferClaim?(callId: string, userId: string): Promise<{ id: string; operator_id: string; bot_room: string | null; provider_call_id: string } | null>;
   /** Find (or create, without opening the 24 h window) the conversation for an outbound notification. */
   openConversationForNotify(operatorId: string, waId: string): Promise<string | null>;
 }

@@ -123,6 +123,9 @@ export interface DispatchRow {
   paidCurrency: string | null;
   refundedMinor: number;
   paymentReview: boolean;
+  accountId?: string | null;
+  accountName?: string | null;
+  accountRef?: string | null;
 }
 
 let seq = 0;

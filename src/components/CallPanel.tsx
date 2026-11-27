@@ -60,7 +60,7 @@ async function answer(call: WaCall) {
 }
 
 /** Simple ring tone (two short beeps every 2 s) with Web Audio. */
-function useRing(on: boolean) {
+export function useRing(on: boolean) {
   const ctx = useRef<AudioContext | null>(null);
   useEffect(() => {
     if (!on) return;

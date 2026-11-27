@@ -31,7 +31,7 @@ class PromptAndGreeting(unittest.TestCase):
     def test_prompt_carries_real_facts_and_rules(self):
         p = stt.build_prompt(FACTS)
         for needle in ("Palermo, Recoleta", "at least 3 hours", "Free cancellation until 24 hours", "Hall A",
-                       "TEST service", "leave_note", "NOT confirmed", "Never ask for card numbers"):
+                       "TEST service", "leave_note", "transfer_to_person", "NOT confirmed", "Never ask for card numbers"):
             self.assertIn(needle, p)
 
     def test_greeting_uses_first_name_and_offers_english(self):
@@ -83,13 +83,77 @@ class Session(unittest.IsolatedAsyncioTestCase):
             await stt.run_call(SimpleNamespace(room=room), caller)
 
         names = sorted(t["function"]["name"] for t in captured)
-        self.assertEqual(names, ["book_trip", "cancel_booking", "end_call", "get_quote", "leave_note", "my_bookings"])
+        self.assertEqual(names, ["book_trip", "cancel_booking", "end_call", "get_quote", "leave_note", "my_bookings", "transfer_to_person"])
         for t in captured:
             self.assertIs(t["function"]["parameters"].get("additionalProperties"), False)
         self.assertTrue(said and said[0].startswith("¡Hola Ana!"))
         self.assertTrue(stt_kwargs["detect_language"])
         self.assertEqual(tts_kwargs["voice_id"], "voice12345")
         self.assertEqual(tts_kwargs["output_format"], "pcm")
+
+    async def _call_with_transfer(self, desk_joins):
+        import asyncio
+        from livekit.plugins import fishaudio, openai, silero
+        handlers, state = {}, {"closed": 0, "replies": []}
+        started = asyncio.Event()
+
+        class FakeSession:
+            def __init__(self, **kwargs):
+                pass
+
+            def on(self, event, cb):
+                handlers["close"] = cb
+
+            async def start(self, *, agent, **kwargs):
+                self.agent = agent
+                state["agent"] = agent
+
+            async def say(self, text, **kwargs):
+                started.set()
+
+            def generate_reply(self, **kwargs):
+                state["replies"].append(kwargs["instructions"])
+
+            async def aclose(self):
+                state["closed"] += 1
+                handlers["close"]()
+
+        room = SimpleNamespace(on=lambda ev, cb: handlers.__setitem__(ev, cb))
+        caller = SimpleNamespace(identity="caller-1", attributes=ATTRS)
+        posts = []
+
+        async def post(_self, action, args=None, language="es"):
+            posts.append(action)
+            return FACTS if action == "config" else {"ok": True}
+
+        with patch("livekit.agents.AgentSession", FakeSession), patch.object(stt.Tools, "post", post), \
+                patch.object(openai, "STT"), patch.object(openai, "LLM"), patch.object(fishaudio, "TTS"), \
+                patch.object(silero.VAD, "load"), patch.object(stt, "TRANSFER_WAIT_S", 0.05):
+            task = asyncio.create_task(stt.run_call(SimpleNamespace(room=room), caller))
+            await started.wait()
+            out = json.loads(await state["agent"].transfer_to_person("Quiere hablar con alguien"))
+            self.assertTrue(out["ok"])
+            if desk_joins:
+                handlers["participant_connected"](SimpleNamespace(identity="desk-u1"))
+                await asyncio.sleep(0.01)
+                self.assertFalse(task.done())                     # Sofía left, the call goes on
+                handlers["participant_disconnected"](SimpleNamespace(identity="desk-u1"))
+            else:
+                await asyncio.sleep(0.15)
+                handlers["participant_disconnected"](SimpleNamespace(identity="caller-1"))
+            await asyncio.wait_for(task, 3)
+        return posts, state
+
+    async def test_transfer_hands_over_when_a_person_joins(self):
+        posts, state = await self._call_with_transfer(desk_joins=True)
+        self.assertIn("transfer", posts)
+        self.assertNotIn("transfer_failed", posts)
+        self.assertGreaterEqual(state["closed"], 1)
+
+    async def test_transfer_times_out_and_sofia_takes_the_call_back(self):
+        posts, state = await self._call_with_transfer(desk_joins=False)
+        self.assertIn("transfer_failed", posts)
+        self.assertTrue(state["replies"] and "WhatsApp" in state["replies"][0])
 
     async def test_missing_config_aborts_before_answering(self):
         caller = SimpleNamespace(identity="c", attributes=ATTRS)

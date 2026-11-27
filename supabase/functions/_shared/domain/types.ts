@@ -2,7 +2,7 @@
 
 export type Direction = "from_airport" | "to_airport";
 export type Locale = "es-AR" | "en";
-export type PaymentMode = "prepaid" | "pay_on_pickup_cash" | "pay_on_pickup_card";
+export type PaymentMode = "prepaid" | "pay_on_pickup_cash" | "pay_on_pickup_card" | "account";
 export type BookingSource = "web" | "whatsapp" | "staff" | "phone" | "voice";
 export type BookingState = "requested" | "needs_driver" | "held" | "confirmed" | "closed" | "cancelled";
 export type CollectionState = "not_applicable" | "awaiting_payment" | "pending_collection" | "collected" | "waived";

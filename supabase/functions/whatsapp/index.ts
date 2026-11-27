@@ -4,6 +4,7 @@
 //   POST /whatsapp/outbox       notification worker, called every minute by pg_cron (x-outbox-key)
 //   POST /whatsapp/staff-send   staff reply from the inbox (Supabase access token; admin, dispatcher or agent)
 //   POST /whatsapp/call-action  answer (SDP), reject or hang up a WhatsApp voice call (same staff check)
+//   POST /whatsapp/call-join    take a call Sofía is transferring: LiveKit token for that call's room (staff)
 //   POST /whatsapp/voice-tool   tools for the voice bot (LiveKit agent on the BCU server), per-call token
 // Voice bot secrets: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET (same LiveKit project as the agent),
 //                    optional VOICE_TOKEN_SECRET.
@@ -17,6 +18,7 @@ import { makeExtractor } from "../_shared/whatsapp/ai.ts";
 import { graphCalls, graphSender, parseWebhook, verifySignature } from "../_shared/whatsapp/meta.ts";
 import type { NotificationContext, TemplateMap } from "../_shared/whatsapp/notify.ts";
 import { liveKitVoiceBot, voiceTool, type VoiceCall } from "../_shared/whatsapp/voice.ts";
+import { mintLiveKitToken } from "../_shared/domain/livekit.ts";
 import { callAction, processOutbox, processWebhook, sendAndRecord, type CallRow, type ConversationRow, type ServiceDeps, type WaDb } from "../_shared/whatsapp/service.ts";
 
 function serviceKey(): string {
@@ -70,6 +72,12 @@ const waDb: WaDb = {
   inboxDone: (key) => rpc("wa_inbox_done", { p_event_key: key }),
   bookingsForPhone: (op, phone) => rpc("wa_bookings_for_phone", { p_operator: op, p_phone: phone }),
   driverRespond: (d, o, a) => rpc("wa_driver_respond", { p_driver: d, p_offer: o, p_accept: a }),
+  callTransferRequest: (id, reason) => rpc("wa_call_transfer_request", { p_call_id: id, p_reason: reason }),
+  callTransferFailed: (id) => rpc("wa_call_transfer_failed", { p_call_id: id }),
+  async callTransferClaim(id, user) {
+    const r = await rpc<{ id: string | null; operator_id: string; bot_room: string | null; provider_call_id: string }>("wa_call_transfer_claim", { p_call: id, p_user: user });
+    return r?.id ? r as { id: string; operator_id: string; bot_room: string | null; provider_call_id: string } : null;
+  },
   passengerCancel: (op, phone, ref, ok, via) => rpc("wa_passenger_cancel", { p_operator: op, p_phone: phone, p_reference: ref, p_confirm: ok, p_via: via }),
   rate: (op, phone, id, n, c) => rpc("wa_rate", { p_operator: op, p_phone: phone, p_booking: id, p_score: n, p_comment: c }),
   outboxClaim: (limit) => rpc("wa_outbox_claim", { p_limit: limit }),
@@ -171,6 +179,8 @@ Deno.serve(async (req) => {
       bookingsForPhone: (phone) => waDb.bookingsForPhone(cfg.operatorId, phone),
       note: (id, note, cb) => waDb.callNote(id, note, cb),
       cancel: (phone, ref, ok) => waDb.passengerCancel!(cfg.operatorId, phone, ref, ok, "voice"),
+      transfer: (id, reason) => waDb.callTransferRequest!(id, reason),
+      transferFailed: (id) => waDb.callTransferFailed!(id),
       async sendWhatsApp(call: VoiceCall, m) {
         if (!configured() || !call.conversationId) return false;
         const sent = await sendAndRecord(deps, call.conversationId, call.waId, m);
@@ -188,6 +198,23 @@ Deno.serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const r = await callAction(deps, user.id, (op) => staffOf(user.id, op), body ?? {});
     return json(r.status, r.body);
+  }
+
+  // --- A desk agent takes a call Sofía is transferring: joins the call's LiveKit room from the browser.
+  if (path.endsWith("/call-join")) {
+    const user = await staffUser(req);
+    if (!user) return json(401, { error: { code: "unauthenticated" } });
+    const lk = { url: env("LIVEKIT_URL"), apiKey: env("LIVEKIT_API_KEY"), apiSecret: env("LIVEKIT_API_SECRET") };
+    if (!lk.url || !lk.apiKey || !lk.apiSecret) return json(503, { error: { code: "voice_not_configured" } });
+    const body = await req.json().catch(() => ({}));
+    const { data: row } = await db.from("wa_calls").select("operator_id").eq("id", String(body?.callId ?? "")).maybeSingle();
+    if (!row) return json(404, { error: { code: "call_not_found" } });
+    if (!(await staffOf(user.id, row.operator_id))) return json(403, { error: { code: "forbidden" } });
+    const c = await waDb.callTransferClaim!(String(body.callId), user.id);
+    if (!c || !c.bot_room) return json(409, { error: { code: "transfer_taken" } });
+    const token = await mintLiveKitToken({ apiKey: lk.apiKey, apiSecret: lk.apiSecret, identity: `desk-${user.id}`,
+      name: `Central (${user.email?.split("@")[0] ?? "staff"})`, room: c.bot_room, canPublish: true, ttlSeconds: 3600, metadata: { kind: "desk" } });
+    return json(200, { url: lk.url, token, room: c.bot_room });
   }
 
   // --- Staff reply from the inbox

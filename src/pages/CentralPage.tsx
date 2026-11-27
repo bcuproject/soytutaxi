@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Badge, Button, Logo } from "../components/ui";
 import { CallPanel, useCalls } from "../components/CallPanel";
+import { TransferCalls } from "../components/TransferCalls";
 import { WhatsAppInbox } from "../components/WhatsAppInbox";
 import { backend, CommandError, type CallMode, type DeskMethod, type DeskMode, type DispatchRow, type StaffSession, type WaCall } from "../lib/backend";
 import { cx, fmtDateTime, fmtTime, formatMoney } from "../lib/format";
@@ -154,6 +155,7 @@ function Central({ session, onSignOut }: { session: StaffSession; onSignOut: () 
         <CallPanel calls={calls} reload={reloadCalls} onNewBooking={startBooking}
           onOpenChat={(c) => { setChatId(c.conversationId); setTab("whatsapp"); }}
           onHistory={async (c) => setHistory({ call: c, rows: await backend.callerHistory(c.phone) })} />
+        <TransferCalls calls={calls} reload={reloadCalls} onNewBooking={startBooking} />
         {flash && <div className="rounded-xl bg-emerald-500/10 px-4 py-2 text-sm text-emerald-200" role="status">{flash}</div>}
         {err && <div className="rounded-xl bg-red-500/10 px-4 py-2 text-sm text-red-200" role="alert">{err}</div>}
         {history && <CallerHistory h={history} onClose={() => setHistory(null)} />}

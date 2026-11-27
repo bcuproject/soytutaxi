@@ -99,6 +99,9 @@ export interface VoiceDeps {
   note(providerCallId: string, note: string, callback: boolean): Promise<void>;
   /** Cancellation for the caller's own number; confirm=false returns the terms only. */
   cancel?(phone: string, reference: string, confirm: boolean): Promise<CancelTerms & { cancelled?: boolean }>;
+  /** Ask the Central for a person (a desk agent joins the LiveKit room). */
+  transfer?(providerCallId: string, reason: string): Promise<{ ok: boolean }>;
+  transferFailed?(providerCallId: string): Promise<void>;
   /** WhatsApp message to the caller (within the 24 h window the call opened). */
   sendWhatsApp(call: VoiceCall, m: Outbound): Promise<boolean>;
 }
@@ -109,6 +112,7 @@ const PAY_ES: Record<PaymentMode, [string, string]> = {
   prepaid: ["pago online con link", "online payment link"],
   pay_on_pickup_cash: ["efectivo al chofer", "cash to the driver"],
   pay_on_pickup_card: ["tarjeta al chofer", "card to the driver"],
+  account: ["a cuenta (facturación mensual)", "on account (monthly invoice)"],
 };
 
 /** "STT-ABC234" → "S T T, A B C 2 3 4" so the voice reads it letter by letter. */
@@ -295,6 +299,19 @@ export async function voiceTool(deps: VoiceDeps, input: Record<string, unknown>)
         const w = (why[e.code] ?? [e.code, e.code])[lang === "en" ? 1 : 0];
         return { status: 200, body: { ok: false, say: L(`No se pudo cancelar: ${w}.`, `It couldn't be cancelled: ${w}.`) } };
       }
+    }
+
+    case "transfer": {
+      if (!deps.transfer) return { status: 200, body: { ok: false, say: L("No hay transferencia disponible; ofrecé que lo llamen por WhatsApp.", "Transfer isn't available; offer a WhatsApp callback.") } };
+      const r = await deps.transfer(callId, str(args.reason, 300));
+      return { status: 200, body: r.ok
+        ? { ok: true, waitSeconds: 45, say: L("Decí que lo pasás con una persona del equipo y que aguarde un momento en línea.", "Say you're putting them through to a team member and to hold on a moment.") }
+        : { ok: false, say: L("No se pudo transferir; ofrecé que lo llamen por WhatsApp.", "The transfer failed; offer a WhatsApp callback.") } };
+    }
+
+    case "transfer_failed": {
+      await deps.transferFailed?.(callId);
+      return { status: 200, body: { ok: true } };
     }
 
     case "note": {

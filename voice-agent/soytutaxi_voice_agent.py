@@ -23,6 +23,7 @@ DEFAULT_VOICE = os.environ.get("SOYTUTAXI_FISH_VOICE", "")
 FISH_MODEL = os.environ.get("SOYTUTAXI_FISH_MODEL", "s2.1-pro")
 LLM_MODEL = os.environ.get("SOYTUTAXI_LLM_MODEL", "gpt-4.1-mini")
 STT_MODEL = os.environ.get("SOYTUTAXI_STT_MODEL", "gpt-4o-transcribe")
+TRANSFER_WAIT_S = 45     # how long the caller holds while the Central picks up
 KEYTERMS = ["SoyTuTaxi", "Ezeiza", "Aeroparque", "Jorge Newbery", "Aerolíneas Argentinas", "LATAM", "Flybondi", "JetSMART",
             "Palermo", "Recoleta", "Microcentro", "Puerto Madero", "Belgrano", "Tigre", "Retiro", "San Telmo",
             "valijas", "equipaje de mano", "minivan", "TaxiBus"]
@@ -67,9 +68,10 @@ WHAT YOU CAN DO:
 2. Tell callers about their bookings with my_bookings (only bookings of the number they are calling from).
    To cancel: find the reference with my_bookings, call cancel_booking with confirm=false, read the terms (refund)
    to the caller, and only after a clear yes call cancel_booking again with confirm=true. Then say what it returned.
-3. Answer questions using ONLY the facts below. If you don't know, or they want to change a booking,
-   complain, have a special request (child seat, pets, wheelchair…), or ask for a person: say a team member will
-   contact them on WhatsApp, then call leave_note with a one-line summary and callback=true.
+3. Answer questions using ONLY the facts below. If they ask to speak to a person, or are upset, or need something
+   you can't do (change a booking, complaint, special request): offer to put them through now and call
+   transfer_to_person with a one-line reason; tell them to hold on. If transfer_to_person fails, or they prefer
+   a callback, say a team member will contact them on WhatsApp and call leave_note with callback=true.
 Never invent prices, times, drivers or policies. Never ask for card numbers or the phone number (we already have it).
 When the caller is done, say a short goodbye and call end_call.{demo}
 
@@ -126,6 +128,28 @@ async def run_call(ctx, caller):
 
     attrs = dict(caller.attributes)
     done = asyncio.Event()
+    transfer_pending, handed = asyncio.Event(), asyncio.Event()
+    desk = {"identity": None}
+    watchers = []
+    session = None
+
+    async def watch_transfer(language):
+        """Sofía steps out when a desk agent joins; if nobody does in time, she takes the call back."""
+        try:
+            await asyncio.wait_for(handed.wait(), timeout=TRANSFER_WAIT_S)
+        except asyncio.TimeoutError:
+            transfer_pending.clear()
+            await tools.post("transfer_failed", {}, language)
+            session.generate_reply(instructions=(
+                "Nobody at the Central could pick up right now. Apologise briefly, say a team member will contact "
+                "them on WhatsApp soon, and ask if you can help with anything else; if not, say goodbye and call end_call."))
+            return
+        log.info("soytutaxi call handed to the Central")
+        try:
+            await session.aclose()      # Sofía leaves the conversation; caller and agent stay in the room
+        except Exception:  # noqa: BLE001
+            pass
+
     async with aiohttp.ClientSession() as http:
         tools = Tools(http, attrs)
         facts = await tools.post("config")
@@ -209,6 +233,22 @@ async def run_call(ctx, caller):
                 return json.dumps(await tools.post("note", {"note": note, "callback": callback}), ensure_ascii=False)
 
             @function_tool
+            async def transfer_to_person(self, reason: str, language: str = "es") -> str:
+                """Put the caller through, live, to a person at the SoyTuTaxi Central. Tell them to hold on first.
+
+                Args:
+                    reason: one-line summary for the person who picks up.
+                    language: "es" or "en".
+                """
+                if transfer_pending.is_set():
+                    return json.dumps({"ok": True, "say": "Already waiting for a person; keep the caller company briefly."})
+                r = await tools.post("transfer", {"reason": reason}, language)
+                if r.get("ok"):
+                    transfer_pending.set()
+                    watchers.append(asyncio.create_task(watch_transfer(language)))
+                return json.dumps(r, ensure_ascii=False)
+
+            @function_tool
             async def end_call(self) -> str:
                 """Hang up after you have said goodbye."""
                 done.set()
@@ -226,8 +266,20 @@ async def run_call(ctx, caller):
             tts=fishaudio.TTS(**tts_args),
         )
         room = ctx.room
-        room.on("participant_disconnected", lambda p: p.identity == caller.identity and done.set())
-        session.on("close", lambda *_: done.set())
+
+        def joined(p):
+            if transfer_pending.is_set() and not handed.is_set() and str(p.identity).startswith("desk-"):
+                desk["identity"] = p.identity
+                handed.set()
+
+        def left(p):
+            if p.identity == caller.identity or (desk["identity"] and p.identity == desk["identity"]):
+                done.set()
+
+        room.on("participant_connected", joined)
+        room.on("participant_disconnected", left)
+        # Once a person has taken over, Sofía's session closing must not end the call.
+        session.on("close", lambda *_: handed.is_set() or done.set())
         await session.start(agent=Sofia(), room=room,
                             room_input_options=RoomInputOptions(participant_identity=caller.identity,
                                                                 close_on_disconnect=True))
@@ -237,6 +289,8 @@ async def run_call(ctx, caller):
             await done.wait()
             await asyncio.sleep(1.5)   # let the goodbye finish playing
         finally:
+            for w in watchers:
+                w.cancel()
             try:
                 await session.aclose()
             except Exception:  # noqa: BLE001

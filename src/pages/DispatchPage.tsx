@@ -10,12 +10,13 @@ import { WhatsAppInbox } from "../components/WhatsAppInbox";
 import { FlightsPanel } from "../components/FlightsPanel";
 import { DriversAdmin } from "../components/DriversAdmin";
 import { ReportsPanel } from "../components/ReportsPanel";
+import { AccountsPanel } from "../components/AccountsPanel";
 import { cx, fmtDateTime, fmtLocalDate, fmtTime, formatMoney } from "../lib/format";
 import { useConfig } from "./BookingPage";
 
 // Spanish-first operational screen. Labels are centralised for later locale work.
 const L = {
-  title: "Despacho", bookings: "Reservas", schedule: "Agenda", map: "Mapa", whatsapp: "WhatsApp", flights: "Vuelos", drivers: "Choferes", reports: "Informes", today: "Hoy", tomorrow: "Mañana",
+  title: "Despacho", bookings: "Reservas", schedule: "Agenda", map: "Mapa", whatsapp: "WhatsApp", flights: "Vuelos", drivers: "Choferes", accounts: "Cuentas", reports: "Informes", today: "Hoy", tomorrow: "Mañana",
   all: "Todos", airport: "Aeropuerto", state: "Estado", driver: "Chofer", payment: "Pago", search: "Buscar ref., pasajero, vuelo…",
   unassigned: "Sin asignar", none: "No hay reservas para este día con estos filtros.", newBooking: "Nueva reserva",
   signIn: "Ingresar", signOut: "Salir", alerts: "Alertas",
@@ -26,7 +27,7 @@ const STATE_ES: Record<string, string> = {
   requested: "Solicitada", needs_driver: "Sin chofer", held: "Reservada (hold)", confirmed: "Confirmada", closed: "Cerrada", cancelled: "Cancelada",
 };
 const STAGE_ES: Record<string, string> = { scheduled: "programado", en_route: "en camino", at_pickup: "en el punto", onboard: "con pasajero", complete: "finalizado", no_show: "no se presentó" };
-const PAY_ES: Record<string, string> = { prepaid: "Online", pay_on_pickup_cash: "Efectivo", pay_on_pickup_card: "Tarjeta al chofer" };
+const PAY_ES: Record<string, string> = { prepaid: "Online", pay_on_pickup_cash: "Efectivo", pay_on_pickup_card: "Tarjeta al chofer", account: "A cuenta" };
 const COLLECT_ES: Record<string, string> = { awaiting_payment: "pago pendiente", pending_collection: "a cobrar", collected: "cobrado", waived: "bonificado", not_applicable: "" };
 const VC_ES: Record<string, string> = { sedan_premium: "Sedán", minivan: "Minivan", taxibus: "TaxiBus" };
 const SOURCE_ES: Record<string, string> = { web: "Web", whatsapp: "WhatsApp", staff: "Despacho", phone: "Teléfono", voice: "Voz" };
@@ -78,7 +79,7 @@ export default function DispatchPage() {
 function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: () => void }) {
   const today = utcToLocalDate(new Date());
   const [date, setDate] = useState(addDaysLocal(today, 1));
-  const [tab, setTab] = useState<"schedule" | "map" | "bookings" | "whatsapp" | "flights" | "drivers" | "reports">("schedule");
+  const [tab, setTab] = useState<"schedule" | "map" | "bookings" | "whatsapp" | "flights" | "drivers" | "accounts" | "reports">("schedule");
   const [waPending, setWaPending] = useState(0);
   const [atDesk, setAtDesk] = useState(0);
   useEffect(() => {
@@ -163,7 +164,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
           <Logo />
           <span className="rounded-md bg-ink-800 px-2 py-0.5 text-xs font-semibold text-ink-300">{L.title}</span>
           <nav className="ml-4 flex gap-1 rounded-lg bg-ink-900 p-1" role="tablist">
-            {(["schedule", "map", "bookings", "whatsapp", "flights", "drivers", "reports"] as const).map((k) => (
+            {(["schedule", "map", "bookings", "whatsapp", "flights", "drivers", "accounts", "reports"] as const).map((k) => (
               <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)}
                 className={cx("rounded-md px-3 py-1.5 text-sm font-medium", tab === k ? "bg-ink-700 text-white" : "text-ink-400 hover:text-white")}>
                 {L[k]}{k === "whatsapp" && waPending > 0 && <span className="ml-1.5 rounded-full bg-red-500 px-1.5 text-[11px] font-bold text-white">{waPending}</span>}
@@ -180,7 +181,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
           </div>
         </div>
 
-        <div className={cx("flex flex-wrap items-end gap-3 border-t border-ink-800 px-5 py-3", ["whatsapp", "flights", "drivers", "reports"].includes(tab) && "hidden")}>
+        <div className={cx("flex flex-wrap items-end gap-3 border-t border-ink-800 px-5 py-3", ["whatsapp", "flights", "drivers", "accounts", "reports"].includes(tab) && "hidden")}>
           <div className="flex items-center gap-1">
             <Button variant="outline" className="px-3 py-2" aria-label="Día anterior" onClick={() => setDate(addDaysLocal(date, -1))}>‹</Button>
             <div className="w-44"><Input type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} className="py-2" aria-label="Fecha" /></div>
@@ -200,7 +201,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
       </header>
 
       <div className="px-5 py-5">
-        <div className={cx("mb-4 flex flex-wrap items-center gap-x-6 gap-y-2", ["whatsapp", "flights", "drivers", "reports"].includes(tab) && "hidden")}>
+        <div className={cx("mb-4 flex flex-wrap items-center gap-x-6 gap-y-2", ["whatsapp", "flights", "drivers", "accounts", "reports"].includes(tab) && "hidden")}>
           <h1 className="text-lg font-semibold first-letter:uppercase">{fmtLocalDate(date)}</h1>
           <Stat n={counts.total} label="viajes" />
           <Stat n={counts.needs} label="sin chofer" tone="text-amber-300" />
@@ -228,6 +229,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
         {tab === "bookings" && <BookingsGrid rows={filtered} onSelect={setSelected} />}
         {tab === "flights" && <FlightsPanel />}
         {tab === "drivers" && <DriversAdmin />}
+        {tab === "accounts" && <AccountsPanel />}
         {tab === "reports" && <ReportsPanel />}
         {tab === "whatsapp" && <WhatsAppInbox onCount={setWaPending} onOpenBooking={(ref) => {
           const r = rows.find((x) => x.reference === ref);
@@ -431,6 +433,7 @@ const ERR_ES: Record<string, string> = {
   reason_required: "Indicá un motivo.", booking_closed: "La reserva ya está cerrada o cancelada.", no_active_driver: "La reserva no tiene chofer activo.",
   forbidden: "Tu usuario no tiene permiso para esto.", driver_conflict: "El chofer tiene otro viaje a ese horario.",
   no_proposal: "Ya no hay un cambio sugerido.", invalid_amount: "Monto inválido (no puede superar lo cobrado sin reembolsar).",
+  already_paid: "El pasajero ya pagó este viaje.", already_invoiced: "El viaje ya está en una factura de la cuenta.", account_not_found: "Cuenta inexistente o inactiva.",
   documents_missing: "Al chofer o a su vehículo le falta documentación obligatoria (ver Choferes → Documentación).",
   documents_expired: "La documentación del chofer o del vehículo estará vencida en la fecha del viaje.",
   no_payment: "No hay un pago aprobado para reembolsar.", invalid_settings: "Revisá la moneda y el tipo de cambio.", live_only: "Disponible solo en modo en vivo (con Supabase).",
@@ -550,6 +553,7 @@ function BookingDrawer({ row: r, drivers, board, onChanged, onClose }: { row: Di
 
         {r.proposedPickupAt && <PickupProposal r={r} onChanged={onChanged} />}
         <PaymentBox r={r} onChanged={onChanged} />
+        <AccountBox r={r} onChanged={onChanged} />
         <BookingActions r={r} drivers={drivers} board={board} onChanged={onChanged} />
 
         <h3 className="mb-2 mt-6 text-xs font-semibold uppercase tracking-wide text-ink-400">{L.timeline}</h3>
@@ -593,6 +597,38 @@ function FlightLine({ r }: { r: DispatchRow }) {
       <span className={cx("ml-1", stale ? "text-red-300" : "text-ink-500")}>· {stale ? "datos viejos, " : ""}verificado {fmtTime(r.flightCheckedAt)}</span>
       {r.flightReviewReason && <div className="font-semibold text-red-300">⚠ Revisar: {REVIEW_ES[r.flightReviewReason] ?? r.flightReviewReason}</div>}
     </div>
+  );
+}
+
+/** Bill the trip to a hotel/agency account instead of charging the passenger. */
+function AccountBox({ r, onChanged }: { r: DispatchRow; onChanged: () => void }) {
+  const [accounts, setAccounts] = useState<{ id: string; name: string }[] | null>(null);
+  const [pick, setPick] = useState(r.accountId ?? "");
+  const [ref, setRef] = useState(r.accountRef ?? "");
+  const [msg, setMsg] = useState<string | null>(null);
+  const editable = r.state !== "closed" && r.state !== "cancelled" && r.collectionState !== "collected";
+  useEffect(() => { backend.accounts().then((a) => setAccounts(a.filter((x) => x.active)), () => setAccounts([])); }, []);
+  if (!r.accountId && (!editable || !accounts?.length)) return null;
+  return (
+    <section className="mt-4 rounded-xl border border-ink-800 p-3 text-sm" data-testid="account-box">
+      <div className="text-xs uppercase tracking-wide text-ink-400">Facturar a cuenta</div>
+      {r.accountId && <p className="mt-1 text-white">🏨 {r.accountName}{r.accountRef && <span className="text-ink-400"> · {r.accountRef}</span>}</p>}
+      {editable && accounts && (
+        <div className="mt-2 flex flex-wrap items-end gap-2">
+          <Select value={pick} onChange={(e) => setPick(e.target.value)} className="w-56 py-2" aria-label="Cuenta">
+            <option value="">— Paga el pasajero —</option>
+            {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </Select>
+          <Input value={ref} onChange={(e) => setRef(e.target.value)} maxLength={80} placeholder="Huésped / habitación / voucher" className="w-52 py-2" />
+          <Button variant="outline" className="py-2" onClick={async () => {
+            setMsg(null);
+            try { await backend.setBookingAccount(r.id, r.version, pick || null, ref || null); onChanged(); setMsg(pick ? "Se factura a la cuenta ✓" : "Vuelve a pagar el pasajero ✓"); }
+            catch (e) { setMsg(errText(e)); }
+          }}>Guardar</Button>
+        </div>
+      )}
+      {msg && <p className="mt-1 text-xs text-ink-300">{msg}</p>}
+    </section>
   );
 }
 
