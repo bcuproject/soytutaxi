@@ -48,6 +48,18 @@ export interface WaCall {
 }
 export type CallMode = "desk" | "bot";
 
+export type FlightStatus = "scheduled" | "delayed" | "boarding" | "departed" | "en_route" | "approaching" | "landed" | "cancelled" | "diverted" | "unknown";
+export interface BoardFlight {
+  number: string; airline: string; other: { iata: string | null; city: string };
+  scheduled: string; estimated: string | null; actual: string | null; status: FlightStatus;
+  terminal: string | null; gate: string | null; belt: string | null;
+}
+export interface FlightBoard { airport: string; direction: "arr" | "dep"; fetchedAt: string | null; stale: boolean; flights: BoardFlight[]; error?: string }
+export interface MyFlight {
+  reference: string; airport: string; pickupAt: string; flight: string; flightDate: string;
+  info: (BoardFlight & { airport: string; date: string }) | null; fetchedAt: string | null; error?: string; shiftMinutes: number | null;
+}
+
 export interface Backend {
   mode: "demo" | "live";
   api<T>(method: "GET" | "POST", path: string, body?: unknown, headers?: Record<string, string>): Promise<T>;
@@ -105,6 +117,8 @@ export interface Backend {
   callMode(): Promise<{ mode: CallMode; voiceId: string | null }>;
   setCallMode(mode: CallMode, voiceId?: string | null): Promise<void>;
   callbackDone(callId: string): Promise<void>;
+  flightBoard(airport: "EZE" | "AEP", dir: "arr" | "dep"): Promise<FlightBoard>;
+  myFlights(): Promise<{ flights: MyFlight[]; configured: boolean }>;
   /** Demo only: make a fake WhatsApp call ring. */
   simulateCall?(): void;
 }
@@ -335,6 +349,10 @@ class DemoBackend implements Backend {
       handledBy: "desk", wantsCallback: false, botNote: null, callbackDoneAt: null });
     this.notify("wa_calls");
   }
+  async flightBoard(airport: "EZE" | "AEP", dir: "arr" | "dep"): Promise<FlightBoard> {
+    return { airport, direction: dir, fetchedAt: new Date().toISOString(), stale: false, flights: demoFlights(airport, dir) };
+  }
+  async myFlights() { return { flights: [] as MyFlight[], configured: true }; }
   private listeners = new Set<(t: string) => void>();
   private notify(t: string) { for (const l of this.listeners) l(t); }
 
@@ -351,6 +369,30 @@ class DemoBackend implements Backend {
     (this.wa.msgs[id] ??= []).push({ id: `m${Date.now()}`, direction: "out", kind: "text", preview: text, status: "sent", error: null, staff: true, at });
     Object.assign(c, { lastPreview: text, lastDirection: "out", lastAt: at });
   }
+}
+
+/** Demo airport board: plausible flights around now (not real data). */
+function demoFlights(airport: "EZE" | "AEP", dir: "arr" | "dep"): BoardFlight[] {
+  const now = Date.now(), H = 3600_000;
+  const rows: [number, string, string, string, string, number, FlightStatus, string | null][] = airport === "EZE"
+    ? (dir === "arr"
+      ? [[-0.8, "IB 6845", "Iberia", "MAD", "Madrid", -12, "landed", "5"], [-0.3, "AA 997", "American Airlines", "MIA", "Miami", 0, "landed", "3"],
+         [0.4, "AR 1303", "Aerolíneas Argentinas", "MDZ", "Mendoza", 25, "approaching", "2"], [0.9, "LA 8020", "LATAM", "GRU", "São Paulo", 0, "en_route", null],
+         [1.5, "AF 228", "Air France", "CDG", "Paris", 40, "delayed", null], [2.2, "CM 337", "Copa Airlines", "PTY", "Panamá", 0, "en_route", null],
+         [3.1, "DL 101", "Delta", "ATL", "Atlanta", 0, "scheduled", null], [4.0, "UX 41", "Air Europa", "MAD", "Madrid", -5, "scheduled", null],
+         [5.2, "AR 1131", "Aerolíneas Argentinas", "MAD", "Madrid", 0, "cancelled", null]]
+      : [[0.2, "AR 1140", "Aerolíneas Argentinas", "FCO", "Roma", 0, "boarding", null], [0.8, "LA 8011", "LATAM", "SCL", "Santiago", 15, "delayed", null],
+         [1.6, "AA 900", "American Airlines", "MIA", "Miami", 0, "scheduled", null], [2.5, "IB 6844", "Iberia", "MAD", "Madrid", 0, "scheduled", null]])
+    : (dir === "arr"
+      ? [[-0.5, "AR 1855", "Aerolíneas Argentinas", "BRC", "Bariloche", 0, "landed", "1"], [0.3, "FO 5121", "Flybondi", "COR", "Córdoba", 10, "approaching", null],
+         [0.7, "LA 4521", "LATAM", "IGR", "Iguazú", 0, "en_route", null], [1.4, "WJ 3041", "JetSMART", "MDZ", "Mendoza", 0, "scheduled", null]]
+      : [[0.3, "AR 1880", "Aerolíneas Argentinas", "USH", "Ushuaia", 0, "boarding", null], [1.1, "FO 5200", "Flybondi", "NQN", "Neuquén", 20, "delayed", null]]);
+  return rows.map(([h, number, airline, iata, city, shift, status, belt]) => {
+    const scheduled = new Date(Math.round((now + h * H) / 300_000) * 300_000).toISOString();
+    const moved = shift ? new Date(new Date(scheduled).getTime() + shift * 60_000).toISOString() : null;
+    return { number, airline, other: { iata, city }, scheduled, estimated: status === "landed" ? null : moved,
+      actual: status === "landed" ? (moved ?? scheduled) : null, status, terminal: airport === "EZE" ? "A" : null, gate: null, belt };
+  });
 }
 
 function demoWhatsApp() {
@@ -578,6 +620,16 @@ class SupabaseBackend implements Backend {
   }
   async setCallMode(mode: CallMode, voiceId?: string | null) { await this.rpc("desk_set_call_mode", { p_mode: mode, p_voice_id: voiceId || null }); }
   async callbackDone(callId: string) { await this.rpc("desk_callback_done", { p_call: callId }); }
+  private async flightsGet<T>(path: string): Promise<T> {
+    const { data } = await this.sb.auth.getSession();
+    if (!data.session) throw new CommandError("unauthenticated");
+    const res = await fetch(`${this.url}/functions/v1/flights${path}`, { headers: { apikey: this.anonKey, authorization: `Bearer ${data.session.access_token}` } });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new CommandError(body?.error?.code ?? "flights_error");
+    return body as T;
+  }
+  async flightBoard(airport: "EZE" | "AEP", dir: "arr" | "dep") { return this.flightsGet<FlightBoard>(`/board?airport=${airport}&dir=${dir}`); }
+  async myFlights() { return this.flightsGet<{ flights: MyFlight[]; configured: boolean }>("/mine"); }
   async radioToken() {
     const { data } = await this.sb.auth.getSession();
     if (!data.session) throw new CommandError("unauthenticated");

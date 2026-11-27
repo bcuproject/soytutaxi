@@ -94,6 +94,23 @@ await page.screenshot({ path: `${SHOTS}/7-whatsapp.png` });
 await clickText("button", "Devolver al bot");
 await clickText('[role="tab"]', "Agenda");
 
+// Airport timetable (same panel as the driver app's Vuelos tab)
+await clickText('[role="tab"]', "Vuelos");
+await page.waitForSelector('[data-testid="flight-board"] li');
+assert(await page.$eval('[data-testid="flight-board"]', (e) => e.innerText.includes("Mendoza") && e.innerText.includes("Demorado")), "EZE arrivals board with live status");
+await page.type('input[aria-label="Buscar vuelo"]', "ar 1303");
+await page.waitForFunction(() => document.querySelectorAll('[data-testid="flight-board"] li').length === 1);
+assert(true, "board search by flight number");
+await page.screenshot({ path: `${SHOTS}/12-flights.png` });
+await page.click('input[aria-label="Buscar vuelo"]', { clickCount: 3 });
+await page.keyboard.press("Backspace");
+await clickText('[data-testid="flights"] button', "AEP");
+await page.waitForFunction(() => document.querySelector('[data-testid="flight-board"]').innerText.includes("Bariloche"));
+await page.setViewport({ width: 390, height: 844 });   // isMobile would reload the page and drop demo state
+await page.screenshot({ path: `${SHOTS}/13-flights-phone.png` });
+await page.setViewport({ width: 1440, height: 900 });
+await clickText('[role="tab"]', "Agenda");
+
 // Central de reservas: manual mode, a WhatsApp call, a booking taken during the call, sent to dispatch
 await clickText("a", "Central");
 await page.waitForSelector('[data-testid="desk-mode"]');
@@ -161,7 +178,7 @@ await clickText("button", "Volver a despacho");
 await page.waitForSelector('[data-testid="schedule"]');
 
 // Mobile form
-await page.setViewport({ width: 390, height: 844, isMobile: true });
+await page.setViewport({ width: 390, height: 844 });   // isMobile would reload the page and drop demo state
 await page.goto(BASE + "/", { waitUntil: "networkidle0" });
 await page.evaluate(() => localStorage.setItem("stt_locale", "es-AR"));
 await page.reload({ waitUntil: "networkidle0" });

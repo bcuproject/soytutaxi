@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import type { TripStage } from "@shared/domain/types.ts";
 import { Badge, Button, Field, Input, Logo } from "../components/ui";
 import { Radio } from "../components/Radio";
+import { FlightsPanel } from "../components/FlightsPanel";
 import { backend, CommandError, type DriverJob, type DriverMe, type DriverOffer, type JobBoard, type StaffSession } from "../lib/backend";
 import { cx, fmtDateShort, fmtLocalDate, fmtTime, formatMoney } from "../lib/format";
 
@@ -78,7 +79,7 @@ function Driver({ onSignOut }: { onSignOut: () => void }) {
   const [me, setMe] = useState<DriverMe | null>(null);
   const [offers, setOffers] = useState<DriverOffer[]>([]);
   const [jobs, setJobs] = useState<DriverJob[]>([]);
-  const [tab, setTab] = useState<"jobs" | "board" | "offers" | "radio" | "earnings">("jobs");
+  const [tab, setTab] = useState<"jobs" | "board" | "offers" | "flights" | "radio" | "earnings">("jobs");
   const [jobBoard, setJobBoard] = useState<JobBoard | null>(null);
   const [fatal, setFatal] = useState<string | null>(null);
   const [toast, setToast] = useState<{ ok: boolean; text: string } | null>(null);
@@ -245,6 +246,8 @@ function Driver({ onSignOut }: { onSignOut: () => void }) {
           </div>
         )}
 
+        {tab === "flights" && <FlightsPanel showMine compact />}
+
         {tab === "radio" && (
           <div className="pt-6">
             <p className="mb-4 text-center text-sm text-ink-400">Canal de despacho. Dejá la app abierta para escuchar.</p>
@@ -271,9 +274,9 @@ function Driver({ onSignOut }: { onSignOut: () => void }) {
       </main>
 
       <nav className="fixed inset-x-0 bottom-0 z-20 border-t border-ink-800 bg-ink-950/95 backdrop-blur">
-        <div className="mx-auto grid max-w-md grid-cols-5">
-          {([["jobs", "Trabajos", jobs.filter(active).length], ["board", "Bolsa", jobBoard?.jobs.length ?? 0], ["offers", "Ofertas", offers.length], ["radio", "Radio", 0], ["earnings", "Ganancias", 0]] as const).map(([k, l, n]) => (
-            <button key={k} onClick={() => setTab(k)} className={cx("relative py-4 text-[13px] font-semibold", tab === k ? "text-cab-400" : "text-ink-400")}>
+        <div className="mx-auto grid max-w-md grid-cols-6">
+          {([["jobs", "Trabajos", jobs.filter(active).length], ["board", "Bolsa", jobBoard?.jobs.length ?? 0], ["offers", "Ofertas", offers.length], ["flights", "Vuelos", 0], ["radio", "Radio", 0], ["earnings", "Ganancias", 0]] as const).map(([k, l, n]) => (
+            <button key={k} onClick={() => setTab(k)} className={cx("relative py-4 text-[12px] font-semibold", tab === k ? "text-cab-400" : "text-ink-400")}>
               {l}{n > 0 && <span className="absolute right-1 top-1.5 grid h-5 min-w-5 place-items-center rounded-full bg-cab-500 px-1 text-[11px] text-ink-950">{n}</span>}
             </button>
           ))}

@@ -57,6 +57,12 @@ This release is the dispatch backend and web front end for Buenos Aires transfer
 - Notes and callback requests from the bot appear under **Para devolver la llamada**.
 - Server install: see `voice-agent/README.md` and step 7 of `docs/WHATSAPP_SETUP.md`.
 
+## Airport timetable (Vuelos)
+
+- **Driver app → Vuelos** has three views. **Mis vuelos** shows the live status of the driver's own airport pickups in the next 30 h: scheduled vs estimated or actual landing and the shift in minutes, terminal, baggage belt, and the agreed pickup time. **Llegadas** and **Salidas** are boards for EZE and AEP covering the next 8 h, with search. The same boards are in **Despacho → Vuelos**.
+- Data: AeroDataBox (`supabase/functions/_shared/flights/aerodatabox.ts`; swap this one file to change provider), through the `flights` Edge Function (drivers and staff only). A shared cache (`flight_cache`) means each board is fetched at most every 5 min, and each flight every 3 min near landing (30 min otherwise), however many drivers are looking. If the provider is down, the last copy is shown and marked as not updated.
+- Secrets: `FLIGHTS_API_KEY` and `FLIGHTS_PROVIDER` (`apimarket`, the default, or `rapidapi`). Without a key, the tab explains that the provider isn't connected.
+
 ## Live staging (26 Nov 2026)
 
 - Supabase project `soytutaxi` (ref `sxjhtsyguacfyixaeydz`, São Paulo). Migrations and demo data applied, `api` Edge Function deployed (`verify_jwt = false`).
