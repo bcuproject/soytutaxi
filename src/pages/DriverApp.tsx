@@ -4,7 +4,7 @@ import type { TripStage } from "@shared/domain/types.ts";
 import { Badge, Button, Field, Input, Logo } from "../components/ui";
 import { Radio } from "../components/Radio";
 import { FlightsPanel } from "../components/FlightsPanel";
-import { backend, CommandError, type DriverJob, type DriverMe, type DriverOffer, type JobBoard, type StaffSession } from "../lib/backend";
+import { backend, CommandError, type DriverJob, type DriverMe, type DriverOffer, type DriverStatement, type JobBoard, type StaffSession } from "../lib/backend";
 import { cx, fmtDateShort, fmtLocalDate, fmtTime, formatMoney } from "../lib/format";
 
 const SEND_EVERY_MS = 15_000;
@@ -20,6 +20,8 @@ const STAGE_ES: Record<TripStage, string> = {
 const ERR: Record<string, string> = {
   stale_version: "El trabajo cambió. Actualizamos los datos.", job_released: "Este trabajo ya no es tuyo.",
   off_shift: "Iniciá el turno primero.", schedule_conflict: "Ya tenés otro viaje en ese horario.",
+  documents_missing: "Te falta cargar documentación (licencia, seguro, VTV o habilitación). Hablá con despacho.",
+  documents_expired: "Tu documentación estará vencida en la fecha del viaje. Renovala y avisá a despacho.",
   outside_working_hours: "Ese viaje está fuera de tu horario.", vehicle_too_small: "Tu vehículo no alcanza para ese viaje.",
   not_a_driver: "Tu usuario no está vinculado a un chofer aprobado. Avisá a despacho.",
   invalid_transition: "Ese paso no corresponde ahora.", live_only: "La app de choferes funciona solo en modo en vivo.",
@@ -269,6 +271,7 @@ function Driver({ onSignOut }: { onSignOut: () => void }) {
               <span className="text-xl font-bold tabular-nums">{formatMoney(me.cashToHandInMinor, me.earnings.currency, "es-AR")}</span>
             </div>
             <p className="text-xs text-ink-500">{me.earnings.trips} viaje(s). SoyTuTaxi realiza los pagos a choferes.</p>
+            <MyPay />
           </div>
         )}
       </main>
@@ -285,6 +288,65 @@ function Driver({ onSignOut }: { onSignOut: () => void }) {
       </nav>
 
       {toast && <div role="status" className={cx("fixed inset-x-4 bottom-20 z-30 mx-auto max-w-md rounded-xl px-4 py-3 text-sm font-medium shadow-lg", toast.ok ? "bg-emerald-500 text-ink-950" : "bg-red-500 text-white")}>{toast.text}</div>}
+    </div>
+  );
+}
+
+const DOC_ES: Record<string, string> = { license: "Licencia", professional_license: "Licencia profesional", insurance: "Seguro", vtv: "VTV", permit: "Habilitación", other: "Otro" };
+
+/** Statement (pending + past settlements) and document expiry, live mode only. */
+function MyPay() {
+  const [st, setSt] = useState<DriverStatement | null>(null);
+  const [batch, setBatch] = useState<string | null>(null);
+  useEffect(() => { backend.driverStatement(batch).then(setSt, () => setSt(null)); }, [batch]);
+  if (!st) return null;
+  const t = st.totals[0];
+  return (
+    <div className="grid gap-3" data-testid="my-pay">
+      {st.documentProblem && (
+        <div className="rounded-2xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+          {st.documentProblem.startsWith("documents_missing") ? "Falta" : "Venció"}: {DOC_ES[st.documentProblem.split(":")[1]] ?? ""}. Sin documentación vigente no podés recibir viajes.
+        </div>
+      )}
+      <div className="rounded-2xl border border-ink-800 px-4 py-3">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-semibold text-white">{batch ? "Liquidación cerrada" : "Pendiente de liquidar"}</span>
+          {batch && <button onClick={() => setBatch(null)} className="text-xs text-cab-400">← Pendiente</button>}
+        </div>
+        {st.lines.slice(-30).map((l, i) => (
+          <div key={i} className="flex justify-between border-t border-ink-800 py-1.5 text-xs">
+            <span className="text-ink-300">{fmtDateShort(l.at)} · {l.kind === "trip" ? `Viaje ${l.reference}` : l.kind === "cash" ? `Efectivo ${l.reference}` : `Ajuste: ${l.note}`}</span>
+            <span className={cx("tabular-nums", l.cashMinor ? "text-amber-300" : "text-white")}>{l.cashMinor ? `−${formatMoney(l.cashMinor, l.currency, "es-AR")}` : formatMoney(l.earningMinor, l.currency, "es-AR")}</span>
+          </div>
+        ))}
+        {t && <div className="mt-2 flex justify-between border-t border-ink-700 pt-2 text-sm font-semibold">
+          <span>{t.netMinor >= 0 ? "Te pagamos" : "A rendir"}</span><span className="tabular-nums">{formatMoney(Math.abs(t.netMinor), t.currency, "es-AR")}</span>
+        </div>}
+        {!st.lines.length && <p className="py-2 text-xs text-ink-500">Sin movimientos pendientes.</p>}
+      </div>
+      {st.batches.length > 0 && (
+        <div className="rounded-2xl border border-ink-800 px-4 py-3 text-xs">
+          <div className="mb-1 font-semibold uppercase tracking-wide text-ink-400">Liquidaciones</div>
+          {st.batches.map((b) => (
+            <button key={b.id} onClick={() => setBatch(b.id)} className="flex w-full justify-between py-1.5 text-left">
+              <span className="text-ink-300">{fmtDateShort(b.at)} · {b.trips} viaje(s)</span><span className="tabular-nums text-white">{formatMoney(b.netMinor, b.currency, "es-AR")}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {st.documents.length > 0 && (
+        <div className="rounded-2xl border border-ink-800 px-4 py-3 text-xs">
+          <div className="mb-1 font-semibold uppercase tracking-wide text-ink-400">Mi documentación</div>
+          {st.documents.map((d) => (
+            <div key={d.kind} className="flex justify-between py-1">
+              <span className="text-ink-300">{DOC_ES[d.kind]}</span>
+              <span className={d.status === "ok" ? "text-emerald-300" : d.status === "expiring" ? "text-amber-300" : "text-red-300"}>
+                {d.status === "expired" ? "Vencida " : "Vence "}{fmtLocalDate(d.expiresOn, "es-AR")}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

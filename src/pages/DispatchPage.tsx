@@ -8,12 +8,14 @@ import { DriverMap, STATUS_COLOR, STATUS_ES } from "../components/DriverMap";
 import { Radio } from "../components/Radio";
 import { WhatsAppInbox } from "../components/WhatsAppInbox";
 import { FlightsPanel } from "../components/FlightsPanel";
+import { DriversAdmin } from "../components/DriversAdmin";
+import { ReportsPanel } from "../components/ReportsPanel";
 import { cx, fmtDateTime, fmtLocalDate, fmtTime, formatMoney } from "../lib/format";
 import { useConfig } from "./BookingPage";
 
 // Spanish-first operational screen. Labels are centralised for later locale work.
 const L = {
-  title: "Despacho", bookings: "Reservas", schedule: "Agenda", map: "Mapa", whatsapp: "WhatsApp", flights: "Vuelos", today: "Hoy", tomorrow: "Mañana",
+  title: "Despacho", bookings: "Reservas", schedule: "Agenda", map: "Mapa", whatsapp: "WhatsApp", flights: "Vuelos", drivers: "Choferes", reports: "Informes", today: "Hoy", tomorrow: "Mañana",
   all: "Todos", airport: "Aeropuerto", state: "Estado", driver: "Chofer", payment: "Pago", search: "Buscar ref., pasajero, vuelo…",
   unassigned: "Sin asignar", none: "No hay reservas para este día con estos filtros.", newBooking: "Nueva reserva",
   signIn: "Ingresar", signOut: "Salir", alerts: "Alertas",
@@ -76,7 +78,7 @@ export default function DispatchPage() {
 function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: () => void }) {
   const today = utcToLocalDate(new Date());
   const [date, setDate] = useState(addDaysLocal(today, 1));
-  const [tab, setTab] = useState<"schedule" | "map" | "bookings" | "whatsapp" | "flights">("schedule");
+  const [tab, setTab] = useState<"schedule" | "map" | "bookings" | "whatsapp" | "flights" | "drivers" | "reports">("schedule");
   const [waPending, setWaPending] = useState(0);
   const [atDesk, setAtDesk] = useState(0);
   useEffect(() => {
@@ -161,7 +163,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
           <Logo />
           <span className="rounded-md bg-ink-800 px-2 py-0.5 text-xs font-semibold text-ink-300">{L.title}</span>
           <nav className="ml-4 flex gap-1 rounded-lg bg-ink-900 p-1" role="tablist">
-            {(["schedule", "map", "bookings", "whatsapp", "flights"] as const).map((k) => (
+            {(["schedule", "map", "bookings", "whatsapp", "flights", "drivers", "reports"] as const).map((k) => (
               <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)}
                 className={cx("rounded-md px-3 py-1.5 text-sm font-medium", tab === k ? "bg-ink-700 text-white" : "text-ink-400 hover:text-white")}>
                 {L[k]}{k === "whatsapp" && waPending > 0 && <span className="ml-1.5 rounded-full bg-red-500 px-1.5 text-[11px] font-bold text-white">{waPending}</span>}
@@ -178,7 +180,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
           </div>
         </div>
 
-        <div className={cx("flex flex-wrap items-end gap-3 border-t border-ink-800 px-5 py-3", (tab === "whatsapp" || tab === "flights") && "hidden")}>
+        <div className={cx("flex flex-wrap items-end gap-3 border-t border-ink-800 px-5 py-3", ["whatsapp", "flights", "drivers", "reports"].includes(tab) && "hidden")}>
           <div className="flex items-center gap-1">
             <Button variant="outline" className="px-3 py-2" aria-label="Día anterior" onClick={() => setDate(addDaysLocal(date, -1))}>‹</Button>
             <div className="w-44"><Input type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} className="py-2" aria-label="Fecha" /></div>
@@ -198,7 +200,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
       </header>
 
       <div className="px-5 py-5">
-        <div className={cx("mb-4 flex flex-wrap items-center gap-x-6 gap-y-2", (tab === "whatsapp" || tab === "flights") && "hidden")}>
+        <div className={cx("mb-4 flex flex-wrap items-center gap-x-6 gap-y-2", ["whatsapp", "flights", "drivers", "reports"].includes(tab) && "hidden")}>
           <h1 className="text-lg font-semibold first-letter:uppercase">{fmtLocalDate(date)}</h1>
           <Stat n={counts.total} label="viajes" />
           <Stat n={counts.needs} label="sin chofer" tone="text-amber-300" />
@@ -225,6 +227,8 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
         {tab === "map" && <MapPanel board={board} rows={rows} onSelectBooking={setSelected} />}
         {tab === "bookings" && <BookingsGrid rows={filtered} onSelect={setSelected} />}
         {tab === "flights" && <FlightsPanel />}
+        {tab === "drivers" && <DriversAdmin />}
+        {tab === "reports" && <ReportsPanel />}
         {tab === "whatsapp" && <WhatsAppInbox onCount={setWaPending} onOpenBooking={(ref) => {
           const r = rows.find((x) => x.reference === ref);
           if (r) setSelected(r); else { setQ(ref); setTab("bookings"); }
@@ -427,6 +431,8 @@ const ERR_ES: Record<string, string> = {
   reason_required: "Indicá un motivo.", booking_closed: "La reserva ya está cerrada o cancelada.", no_active_driver: "La reserva no tiene chofer activo.",
   forbidden: "Tu usuario no tiene permiso para esto.", driver_conflict: "El chofer tiene otro viaje a ese horario.",
   no_proposal: "Ya no hay un cambio sugerido.", invalid_amount: "Monto inválido (no puede superar lo cobrado sin reembolsar).",
+  documents_missing: "Al chofer o a su vehículo le falta documentación obligatoria (ver Choferes → Documentación).",
+  documents_expired: "La documentación del chofer o del vehículo estará vencida en la fecha del viaje.",
   no_payment: "No hay un pago aprobado para reembolsar.", invalid_settings: "Revisá la moneda y el tipo de cambio.", live_only: "Disponible solo en modo en vivo (con Supabase).",
 };
 function boardLabel(r: DispatchRow): { tone: string; text: string } | null {

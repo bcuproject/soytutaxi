@@ -130,6 +130,30 @@ await page.waitForFunction(() => document.querySelector('[data-testid="flight-bo
 await page.setViewport({ width: 390, height: 844 });   // isMobile would reload the page and drop demo state
 await page.screenshot({ path: `${SHOTS}/13-flights-phone.png` });
 await page.setViewport({ width: 1440, height: 900 });
+
+// Choferes: documents (expiring / missing) and pay; Informes
+await clickText('[role="tab"]', "Choferes");
+await page.waitForSelector('[data-testid="doc-row"]');
+assert(await page.$eval('[data-testid="drivers-admin"]', (e) => e.innerText.includes("Falta") && e.innerText.includes("Venció") && e.innerText.includes("Solo avisos")), "documents table shows missing and expired documents, warn-only by default");
+await clickText('[data-testid="doc-row"] button', "Falta");
+await page.waitForSelector('[data-testid="doc-form"]');
+await page.type('[data-testid="doc-form"] input[aria-label="Vencimiento"]', "01012031");
+await clickText('[data-testid="doc-form"] button', "Guardar");
+await page.waitForFunction(() => !document.querySelector('[data-testid="doc-form"]') && ![...document.querySelectorAll('[data-testid="doc-row"] button')].some((b) => b.textContent === "Falta"));
+assert(true, "missing document recorded");
+await page.screenshot({ path: `${SHOTS}/15-documents.png`, fullPage: true });
+await clickText('[data-testid="drivers-admin"] [role="tab"]', "Pagos");
+await page.waitForSelector('[data-testid="pay-row"]');
+await page.click('[data-testid="pay-row"]');
+await page.waitForSelector('[data-testid="statement"]');
+assert(await page.$eval('[data-testid="statement"]', (e) => e.innerText.includes("Efectivo cobrado") && /A pagar|Debe rendir/.test(e.innerText)), "driver statement with cash netted off");
+await page.click('[data-testid="settle"]');
+await page.waitForFunction(() => document.querySelector('[data-testid="pay-row"]').innerText.includes("Sin pendientes"));
+assert(true, "settlement closes the balance");
+await clickText('[role="tab"]', "Informes");
+await page.waitForSelector('[data-testid="reports"] [role="img"]');
+assert(await page.$eval('[data-testid="reports"]', (e) => /por canal/i.test(e.innerText) && /reservas/i.test(e.innerText)), "reports dashboard");
+await page.screenshot({ path: `${SHOTS}/16-reports.png`, fullPage: true });
 await clickText('[role="tab"]', "Agenda");
 
 // Central de reservas: manual mode, a WhatsApp call, a booking taken during the call, sent to dispatch

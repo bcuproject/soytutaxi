@@ -4,7 +4,8 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { handle } from "@shared/api/handler.ts";
 import { MemoryStore, type DispatchRow, type MemEvent } from "@shared/api/memoryStore.ts";
-import { DEMO_DRIVERS } from "@shared/domain/fixtures.ts";
+import { DEMO_DRIVERS, DEMO_VEHICLES } from "@shared/domain/fixtures.ts";
+import { addDaysLocal } from "@shared/domain/time.ts";
 import type { BookingStatusView } from "@shared/api/store.ts";
 import type { Driver, TripStage } from "@shared/domain/types.ts";
 
@@ -125,8 +126,41 @@ export interface Backend {
   /** Passenger status page: Mercado Pago checkout URL for this booking. */
   payCheckout(reference: string, token: string): Promise<string>;
   myFlights(): Promise<{ flights: MyFlight[]; configured: boolean }>;
+
+  // --- Drivers: documents, pay, reports ----------------------------------------------------------
+  compliance(): Promise<Compliance>;
+  setDocument(d: { id?: string | null; driverId?: string | null; vehicleId?: string | null; kind: DocKind; number?: string; expiresOn: string; note?: string }): Promise<void>;
+  setCompliance(enforce: boolean, warnDays: number): Promise<void>;
+  financeOverview(): Promise<FinanceRow[]>;
+  financeStatement(driverId: string, batchId?: string | null): Promise<Statement>;
+  financeAdjust(driverId: string, amountMinor: number, currency: string, note: string): Promise<void>;
+  financeSettle(driverId: string, note: string): Promise<void>;
+  driverStatement(batchId?: string | null): Promise<DriverStatement>;
+  report(from: string, to: string): Promise<Report>;
   /** Demo only: make a fake WhatsApp call ring. */
   simulateCall?(): void;
+}
+
+export type DocKind = "license" | "professional_license" | "insurance" | "vtv" | "permit" | "other";
+export type DocStatus = "ok" | "expiring" | "expired";
+export interface DriverDoc { id: string; owner: "driver" | "vehicle"; kind: DocKind; number: string | null; expiresOn: string; note: string | null; status: DocStatus }
+export interface Compliance {
+  enforce: boolean; warnDays: number; today: string;
+  drivers: { id: string; fullName: string; active: boolean; vehicle: { id: string; plate: string; description: string | null } | null; problem: string | null; documents: DriverDoc[] }[];
+}
+export interface MoneyTotal { currency: string; earningsMinor: number; cashMinor: number; netMinor: number; trips: number }
+export interface FinanceRow { driverId: string; fullName: string; totals: MoneyTotal[]; lastSettlement: { id: string; at: string; netMinor: number; currency: string } | null }
+export interface StatementLine { at: string; kind: "trip" | "adjustment" | "cash"; reference: string | null; earningMinor: number; cashMinor: number; currency: string; note: string }
+export interface Batch { id: string; at: string; currency: string; earningsMinor: number; cashMinor: number; netMinor: number; trips: number; note?: string | null }
+export interface Statement { driver: string; lines: StatementLine[]; totals: MoneyTotal[]; batches: Batch[] }
+export interface DriverStatement { lines: StatementLine[]; totals: MoneyTotal[]; batches: Batch[]; documents: { kind: DocKind; expiresOn: string; status: DocStatus }[]; documentProblem: string | null }
+export interface Report {
+  from: string; to: string; bookings: number; completed: number; cancelled: number; cancelledByPassenger: number;
+  byState: Record<string, number>; bySource: Record<string, number>; byAirport: Record<string, number>; byDirection: Record<string, number>;
+  revenue: { currency: string; amountMinor: number; trips: number }[]; driverCost: { currency: string; amountMinor: number }[];
+  refunds: { currency: string; amountMinor: number }[]; ratings: { count: number; average: number | null; low: number };
+  daily: { day: string; bookings: number; completed: number }[]; topZones: { zone: string; bookings: number }[];
+  drivers: { driverId: string; fullName: string; trips: number; earningsMinor: number; currency: string | null; rating: number | null; ratings: number; noShows: number }[];
 }
 
 export interface BoardRow {
@@ -364,6 +398,38 @@ class DemoBackend implements Backend {
   async paymentSettings() { return { currency: "ARS", fx: { USD: 1200 } }; }
   async setPaymentSettings(): Promise<void> { throw LIVE_ONLY(); }
   async payCheckout(): Promise<string> { throw new CommandError("payments_not_configured"); }
+  private demoOps = demoOps();
+  async compliance() { return this.demoOps.compliance; }
+  async setDocument(d: Parameters<Backend["setDocument"]>[0]) {
+    const drv = this.demoOps.compliance.drivers.find((x) => x.id === d.driverId || x.vehicle?.id === d.vehicleId);
+    if (!drv) return;
+    const owner = d.driverId ? "driver" : "vehicle";
+    const status: DocStatus = d.expiresOn < this.demoOps.compliance.today ? "expired" : d.expiresOn < addDaysLocal(this.demoOps.compliance.today, 30) ? "expiring" : "ok";
+    const ex = drv.documents.find((x) => (d.id ? x.id === d.id : x.kind === d.kind && x.owner === owner));
+    if (ex) Object.assign(ex, { expiresOn: d.expiresOn, number: d.number ?? ex.number, status });
+    else drv.documents.push({ id: `doc${Date.now()}`, owner, kind: d.kind, number: d.number ?? null, expiresOn: d.expiresOn, note: d.note ?? null, status });
+    drv.problem = demoProblem(drv.documents, this.demoOps.compliance.today);
+  }
+  async setCompliance(enforce: boolean, warnDays: number) { Object.assign(this.demoOps.compliance, { enforce, warnDays }); }
+  async financeOverview() { return this.demoOps.finance; }
+  async financeStatement(driverId: string) {
+    const r = this.demoOps.finance.find((x) => x.driverId === driverId)!;
+    return { driver: r.fullName, lines: r.totals.length ? this.demoOps.lines : [], totals: r.totals, batches: [] };
+  }
+  async financeAdjust(): Promise<void> { throw LIVE_ONLY(); }
+  async financeSettle(driverId: string) { const r = this.demoOps.finance.find((x) => x.driverId === driverId)!; r.lastSettlement = { id: "b1", at: new Date().toISOString(), netMinor: r.totals[0]?.netMinor ?? 0, currency: "ARS" }; r.totals = []; }
+  async driverStatement(): Promise<DriverStatement> { throw LIVE_ONLY(); }
+  async report(from: string, to: string): Promise<Report> {
+    const rows = this.store.dispatchRows().filter((r) => r.pickupLocalDate >= from && r.pickupLocalDate <= to);
+    const count = (f: (r: DispatchRow) => string) => rows.reduce<Record<string, number>>((m, r) => ((m[f(r)] = (m[f(r)] ?? 0) + 1), m), {});
+    const days: Report["daily"] = [];
+    for (let d = from; d <= to && days.length < 400; d = addDaysLocal(d, 1)) days.push({ day: d, bookings: rows.filter((r) => r.pickupLocalDate === d).length, completed: 0 });
+    return { from, to, bookings: rows.length, completed: 0, cancelled: rows.filter((r) => r.state === "cancelled").length, cancelledByPassenger: 0,
+      byState: count((r) => r.state), bySource: count((r) => r.source), byAirport: count((r) => r.airport), byDirection: count((r) => r.direction),
+      revenue: [], driverCost: [], refunds: [], ratings: { count: 0, average: null, low: 0 }, daily: days,
+      topZones: Object.entries(count((r) => r.zoneName ?? "—")).map(([zone, bookings]) => ({ zone, bookings })).sort((a, b) => b.bookings - a.bookings),
+      drivers: [] };
+  }
   private listeners = new Set<(t: string) => void>();
   private notify(t: string) { for (const l of this.listeners) l(t); }
 
@@ -658,6 +724,22 @@ class SupabaseBackend implements Backend {
     return { currency: (data?.charge_currency as string) ?? "ARS", fx: (data?.fx_rates as Record<string, number>) ?? {} };
   }
   async setPaymentSettings(currency: string, fx: Record<string, number>) { await this.rpc("admin_set_payment_settings", { p_currency: currency, p_fx: fx }); }
+  async compliance() { return this.rpc<Compliance>("dispatch_compliance"); }
+  async setDocument(d: Parameters<Backend["setDocument"]>[0]) {
+    await this.rpc("admin_set_document", { p_id: d.id ?? null, p_driver: d.driverId ?? null, p_vehicle: d.vehicleId ?? null, p_kind: d.kind,
+      p_number: d.number ?? null, p_expires_on: d.expiresOn, p_note: d.note ?? null });
+  }
+  async setCompliance(enforce: boolean, warnDays: number) { await this.rpc("admin_set_compliance", { p_enforce: enforce, p_warn_days: warnDays }); }
+  async financeOverview() { return this.rpc<FinanceRow[]>("finance_overview"); }
+  async financeStatement(driverId: string, batchId: string | null = null) {
+    return this.rpc<Statement>("finance_statement", { p_driver: driverId, p_to: new Date().toISOString(), p_batch: batchId });
+  }
+  async financeAdjust(driverId: string, amountMinor: number, currency: string, note: string) {
+    await this.rpc("finance_adjustment", { p_driver: driverId, p_amount_minor: amountMinor, p_currency: currency, p_note: note });
+  }
+  async financeSettle(driverId: string, note: string) { await this.rpc("finance_settle", { p_driver: driverId, p_to: new Date().toISOString(), p_note: note }); }
+  async driverStatement(batchId: string | null = null) { return this.rpc<DriverStatement>("driver_statement", { p_batch: batchId }); }
+  async report(from: string, to: string) { return this.rpc<Report>("report_summary", { p_from: from, p_to: to }); }
   async payCheckout(reference: string, token: string) {
     const res = await fetch(`${this.url}/functions/v1/payments/checkout`, {
       method: "POST", headers: { apikey: this.anonKey, "content-type": "application/json" }, body: JSON.stringify({ reference, token }),
@@ -684,3 +766,36 @@ const key = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
 export const backend: Backend = url && key ? new SupabaseBackend(url, key) : new DemoBackend();
 
 export type { BookingStatusView };
+
+function demoProblem(docs: DriverDoc[], today: string) {
+  const need: [DriverDoc["owner"], DocKind][] = [["driver", "license"], ["driver", "professional_license"], ["vehicle", "insurance"], ["vehicle", "permit"], ["vehicle", "vtv"]];
+  for (const [o, k] of need) if (!docs.some((d) => d.owner === o && d.kind === k)) return `documents_missing:${k}`;
+  const ex = docs.find((d) => d.expiresOn < today && d.kind !== "other");
+  return ex ? `documents_expired:${ex.kind}` : null;
+}
+
+function demoOps() {
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Argentina/Buenos_Aires" }).format(new Date());
+  const st = (e: string): DocStatus => (e < today ? "expired" : e < addDaysLocal(today, 30) ? "expiring" : "ok");
+  const full = (i: number, soon?: string): DriverDoc[] => (["license", "professional_license", "insurance", "vtv", "permit"] as DocKind[]).map((k, j) => {
+    const e = soon && j === 2 ? soon : addDaysLocal(today, 200 + i * 30 + j * 10);
+    return { id: `d${i}${j}`, owner: j < 2 ? "driver" : "vehicle", kind: k, number: null, expiresOn: e, note: null, status: st(e) };
+  });
+  const drivers: Compliance["drivers"] = DEMO_DRIVERS.slice(0, 6).map((d, i) => {
+    const v = DEMO_VEHICLES.find((x) => x.id === d.vehicleId) ?? null;
+    const documents = i === 1 ? full(i, addDaysLocal(today, 12)) : i === 3 ? full(i).filter((x) => x.kind !== "vtv") : i === 4 ? full(i, addDaysLocal(today, -3)) : full(i);
+    return { id: d.id, fullName: d.fullName, active: true, vehicle: v ? { id: v.id, plate: v.plate, description: v.description ?? null } : null,
+      problem: demoProblem(documents, today), documents };
+  });
+  const t = (e: number, c: number, n: number): MoneyTotal[] => [{ currency: "ARS", earningsMinor: e, cashMinor: c, netMinor: e - c, trips: n }];
+  const finance: FinanceRow[] = drivers.map((d, i) => ({ driverId: d.id, fullName: d.fullName,
+    totals: i % 3 === 2 ? [] : t(4200000 + i * 900000, i % 2 ? 6500000 : 1800000, 3 + i), lastSettlement: null }));
+  const now = Date.now();
+  const lines: StatementLine[] = [
+    { at: new Date(now - 4 * 86400_000).toISOString(), kind: "trip", reference: "STT-DEM101", earningMinor: 1800000, cashMinor: 0, currency: "ARS", note: "" },
+    { at: new Date(now - 3 * 86400_000).toISOString(), kind: "trip", reference: "STT-DEM102", earningMinor: 1400000, cashMinor: 0, currency: "ARS", note: "" },
+    { at: new Date(now - 3 * 86400_000 + 60_000).toISOString(), kind: "cash", reference: "STT-DEM102", earningMinor: 0, cashMinor: 1800000, currency: "ARS", note: "" },
+    { at: new Date(now - 86400_000).toISOString(), kind: "trip", reference: "STT-DEM103", earningMinor: 1000000, cashMinor: 0, currency: "ARS", note: "" },
+  ];
+  return { compliance: { enforce: false, warnDays: 30, today, drivers } as Compliance, finance, lines };
+}
