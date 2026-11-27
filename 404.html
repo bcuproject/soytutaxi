@@ -1,8 +1,19 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><title>SoyTuTaxi</title>
-<script>
-  // SPA fallback for GitHub Pages: remember the deep link and load the app root.
-  try { sessionStorage.setItem("stt_redirect", location.pathname + location.search + location.hash); } catch (e) {}
-  var seg = location.pathname.split("/")[1];
-  location.replace(location.origin + (location.hostname.endsWith("github.io") && seg ? "/" + seg + "/" : "/"));
-</script></head><body></body></html>
+<html lang="es-AR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <link rel="icon" type="image/svg+xml" href="/soytutaxi/favicon.svg" />
+    <title>SoyTuTaxi · Traslados al aeropuerto</title>
+    <script>
+      // GitHub Pages deep links: 404.html stores the requested path, we restore it here.
+      (function () { try { var p = sessionStorage.getItem("stt_redirect"); if (p) { sessionStorage.removeItem("stt_redirect"); history.replaceState(null, "", p); } } catch (e) {} })();
+    </script>
+    <script type="module" crossorigin src="/soytutaxi/assets/index-DvY4vvCu.js"></script>
+    <link rel="stylesheet" crossorigin href="/soytutaxi/assets/index-5nyAolg7.css">
+  </head>
+  <body class="bg-ink-950 text-white antialiased">
+    <div id="root"></div>
+  </body>
+</html>
