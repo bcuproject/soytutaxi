@@ -254,5 +254,10 @@ await page.reload({ waitUntil: "networkidle0" });
 await page.screenshot({ path: `${SHOTS}/8-mobile-es.png`, fullPage: true });
 
 assert(errors.length === 0, `no console errors ${errors.join(" | ")}`);
+// /conexion: first-admin form (signed out) — the keys form needs a live admin session.
+await page.goto(`${BASE}/conexion`, { waitUntil: "networkidle0" });
+await page.waitForSelector('[data-testid="bootstrap"]');
+assert(await page.$eval('[data-testid="bootstrap"]', (e) => /código de configuración/i.test(e.innerText)), "/conexion offers the first-admin form");
+
 await browser.close();
 console.log("SMOKE PASS");

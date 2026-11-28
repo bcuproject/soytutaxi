@@ -3,6 +3,7 @@
 // the shared dispatch channel. Secrets: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { secretSource } from "../_shared/secrets.ts";
 import { mintLiveKitToken, RADIO_ROOM } from "../_shared/domain/livekit.ts";
 
 function serviceKey(): string {
@@ -17,6 +18,7 @@ function serviceKey(): string {
 }
 
 const db = createClient(Deno.env.get("SUPABASE_URL")!, serviceKey(), { auth: { persistSession: false } });
+const SEC = secretSource(db, (k) => Deno.env.get(k) ?? "");
 const OPERATOR = Deno.env.get("OPERATOR_SLUG") ?? "soytutaxi";
 const CORS = {
   "access-control-allow-origin": Deno.env.get("ALLOWED_ORIGINS") ?? "*",
@@ -30,9 +32,10 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   if (req.method !== "POST" || !new URL(req.url).pathname.endsWith("/token")) return json(404, { error: { code: "not_found" } });
 
-  const url = Deno.env.get("LIVEKIT_URL");
-  const apiKey = Deno.env.get("LIVEKIT_API_KEY");
-  const apiSecret = Deno.env.get("LIVEKIT_API_SECRET");
+  await SEC.refresh();
+  const url = SEC.get("LIVEKIT_URL");
+  const apiKey = SEC.get("LIVEKIT_API_KEY");
+  const apiSecret = SEC.get("LIVEKIT_API_SECRET");
   if (!url || !apiKey || !apiSecret) return json(503, { error: { code: "radio_not_configured", message: "LiveKit secrets are not set." } });
 
   const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.get("authorization") ?? "")?.[1];

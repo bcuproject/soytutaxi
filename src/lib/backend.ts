@@ -144,6 +144,10 @@ export interface Backend {
   callerCalls(phone: string): Promise<PastCall[]>;
   /** WhatsApp connection setup (admin): runs on the server with the stored token. */
   waSetup(action: string, args?: Record<string, unknown>): Promise<Record<string, any>>;
+  /** /conexion: first admin from a one-time setup code; write-only integration keys (Vault). */
+  bootstrapAdmin(code: string, email: string, password: string): Promise<void>;
+  secretStatus(): Promise<SecretStatus[]>;
+  setSecrets(values: Record<string, string>, clear?: string[]): Promise<SecretStatus[]>;
   accounts(): Promise<Account[]>;
   saveAccount(a: Partial<Account> & { name: string }): Promise<string>;
   setBookingAccount(bookingId: string, version: number, accountId: string | null, ref?: string | null): Promise<void>;
@@ -175,6 +179,8 @@ export interface Report {
   daily: { day: string; bookings: number; completed: number }[]; topZones: { zone: string; bookings: number }[];
   drivers: { driverId: string; fullName: string; trips: number; earningsMinor: number; currency: string | null; rating: number | null; ratings: number; noShows: number }[];
 }
+
+export interface SecretStatus { name: string; label: string; set: boolean; updatedAt: string | null }
 
 export interface PastCall { id: string; startedAt: string; status: string; durationS: number | null; handledBy: "desk" | "bot"; transferred: boolean;
   note: string | null; transcript: string | null; bookingRef: string | null }
@@ -466,6 +472,14 @@ class DemoBackend implements Backend {
   }
   async joinTransfer(): Promise<{ url: string; token: string }> { throw LIVE_ONLY(); }
   async waSetup(): Promise<Record<string, any>> { throw LIVE_ONLY(); }
+  async bootstrapAdmin(): Promise<void> { throw LIVE_ONLY(); }
+  private demoSecrets: SecretStatus[] = ["WHATSAPP_ACCESS_TOKEN", "WHATSAPP_APP_SECRET", "WHATSAPP_VERIFY_TOKEN", "LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET", "AI_API_KEY"]
+    .map((name) => ({ name, label: name, set: false, updatedAt: null }));
+  async secretStatus() { return this.demoSecrets; }
+  async setSecrets(values: Record<string, string>) {
+    for (const s of this.demoSecrets) if (values[s.name]?.trim()) Object.assign(s, { set: true, updatedAt: new Date().toISOString() });
+    return this.demoSecrets;
+  }
   async callerCalls(phone: string): Promise<PastCall[]> {
     const past = this.calls.filter((c) => c.phone === phone).map((c) => ({ id: c.id, startedAt: c.startedAt, status: c.status, durationS: c.durationS,
       handledBy: c.handledBy, transferred: !!c.transferTakenAt, note: c.botNote, transcript: null, bookingRef: c.bookingRef }));
@@ -838,6 +852,15 @@ class SupabaseBackend implements Backend {
     if (!res.ok) throw new CommandError(body?.error?.code ?? "call_error", body?.error?.message);
     return body as { url: string; token: string };
   }
+  async bootstrapAdmin(code: string, email: string, password: string) {
+    const res = await fetch(`${this.url}/functions/v1/whatsapp/bootstrap-admin`, {
+      method: "POST", headers: { apikey: this.anonKey, "content-type": "application/json" }, body: JSON.stringify({ code, email, password }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new CommandError(body?.error?.code ?? "setup_error", body?.error?.message);
+  }
+  async secretStatus() { return this.rpc<SecretStatus[]>("admin_secret_status"); }
+  async setSecrets(values: Record<string, string>, clear: string[] = []) { return this.rpc<SecretStatus[]>("admin_set_secrets", { p_values: values, p_clear: clear }); }
   async waSetup(action: string, args: Record<string, unknown> = {}) {
     const { data } = await this.sb.auth.getSession();
     if (!data.session) throw new CommandError("unauthenticated");

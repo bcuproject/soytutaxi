@@ -146,3 +146,38 @@ describe("Customer memory", () => {
     expect(other).toMatchObject({ bookings: [], messages: [], calls: [] });
   });
 });
+
+describe("Integration keys (Vault) and the first-admin setup code", () => {
+  it("admins save keys write-only; status shows only set/not set; only the server can read values", async () => {
+    expect(await code(as(FINANCE, "select admin_set_secrets($1) as r", [{ WHATSAPP_ACCESS_TOKEN: "x" }]))).toBe("forbidden");
+    expect(await code(as(ADMIN, "select admin_set_secrets($1) as r", [{ NOT_A_KEY: "x" }]))).toBe("unknown_secret");
+    const st = await as(ADMIN, "select admin_set_secrets($1) as r", [{ WHATSAPP_ACCESS_TOKEN: "  EAAG-test-token  ", WHATSAPP_APP_SECRET: "", AI_API_KEY: "ai-key" }]);
+    const byName = Object.fromEntries(st.map((s: any) => [s.name, s]));
+    expect(byName.WHATSAPP_ACCESS_TOKEN.set).toBe(true);
+    expect(byName.WHATSAPP_APP_SECRET.set).toBe(false);                     // empty = unchanged
+    expect(JSON.stringify(st)).not.toContain("EAAG-test-token");             // never returned to people
+    expect(JSON.stringify(await as(ADMIN, "select admin_secret_status() as r"))).not.toContain("ai-key");
+    // Replace and clear.
+    await as(ADMIN, "select admin_set_secrets($1, $2) as r", [{ WHATSAPP_ACCESS_TOKEN: "EAAG-new" }, ["AI_API_KEY"]]);
+    expect((await q("select secrets_for_functions() as r"))[0].r).toEqual({ WHATSAPP_ACCESS_TOKEN: "EAAG-new" });
+    // Signed-in users can't call the server-only reader; the audit log has names, not values.
+    expect(await code(as(ADMIN, "select secrets_for_functions() as r"))).toMatch(/permission denied/);
+    const audit = await q("select detail from audit_log where action = 'integration.keys_saved' order by created_at");
+    expect(JSON.stringify(audit)).not.toMatch(/EAAG|ai-key/);
+    expect(audit.at(-1).detail.keys).toEqual(["WHATSAPP_ACCESS_TOKEN", "-AI_API_KEY"]);
+  });
+
+  it("a setup code works once, before it expires, and makes the account admin", async () => {
+    const { createHash } = await import("node:crypto");
+    const h = (c: string) => createHash("sha256").update(`setup:${c}`).digest("hex");
+    await q("insert into app.setup_codes (code_hash, expires_at) values ($1, now() + interval '1 day'), ($2, now() - interval '1 minute')", [h("GOOD-CODE"), h("OLD-CODE")]);
+    expect((await q("select setup_code_valid($1) as r", [h("OLD-CODE")]))[0].r).toBe(false);
+    expect((await q("select setup_code_valid($1) as r", [h("GOOD-CODE")]))[0].r).toBe(true);
+    await q("insert into auth.users (id, email) values ('7e57c0de-0000-4000-8000-0000000000aa', 'owner@soytutaxi.test')");
+    expect((await q("select setup_code_redeem($1, 'owner@soytutaxi.test') as r", [h("GOOD-CODE")]))[0].r).toBe(true);
+    expect((await q("select setup_code_redeem($1, 'other@x.test') as r", [h("GOOD-CODE")]))[0].r).toBe(false);   // single use
+    await q("select setup_grant_admin('Owner@SoyTuTaxi.test')");
+    expect((await q("select role::text from memberships where user_id = '7e57c0de-0000-4000-8000-0000000000aa'"))[0].role).toBe("admin");
+    expect(await code(as(ADMIN, "select setup_grant_admin('x@y.z') as r"))).toMatch(/permission denied/);
+  });
+});

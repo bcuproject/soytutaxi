@@ -122,7 +122,10 @@ describe("claiming", () => {
   });
 
   it("a driver can give a job back until 24 h before pickup; it returns to the board", async () => {
-    const b = await job("STT-DEM001", 48);
+    // Far from the demo trips and with every driver available, so the time of day doesn't matter.
+    await q(`insert into driver_availability (operator_id, driver_id, kind, during, note)
+             select operator_id, id, 'available', tstzrange(now() + interval '240 hours', now() + interval '260 hours', '[)'), 'test-window-2' from drivers`);
+    const b = await job("STT-DEM001", 250);
     await one(DU[4], "select driver_claim($1) as r", [b.id]);
     const jobs = await one(DU[4], "select driver_jobs() as r");
     const mine = jobs.find((j: any) => j.reference === b.reference);
@@ -132,6 +135,7 @@ describe("claiming", () => {
     expect((await board(0)).jobs.some((j: any) => j.bookingId === b.id)).toBe(true);
     const ex = await q("select kind, severity from exceptions where booking_id = $1", [b.id]);
     expect(ex).toEqual([{ kind: "lost_cover", severity: "warning" }]);
+    await q("delete from driver_availability where note = 'test-window-2'");
   });
 
   it("inside 24 h the driver must ask dispatch", async () => {

@@ -4,6 +4,7 @@
 //   POST /flights/track                              flight tracking pass (pg_cron, x-outbox-key): proposes pickups
 // Secrets: FLIGHTS_API_KEY (AeroDataBox) and FLIGHTS_PROVIDER = "apimarket" (default) | "rapidapi".
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { secretSource } from "../_shared/secrets.ts";
 import { aeroDataBox } from "../_shared/flights/aerodatabox.ts";
 import { board, myFlights, trackFlights, type DriverFlightJob, type FlightCacheDb, type TrackTarget } from "../_shared/flights/service.ts";
 
@@ -20,8 +21,18 @@ function serviceKey(): string {
 
 const db = createClient(Deno.env.get("SUPABASE_URL")!, serviceKey(), { auth: { persistSession: false } });
 const OPERATOR = Deno.env.get("OPERATOR_SLUG") ?? "soytutaxi";
-const KEY = Deno.env.get("FLIGHTS_API_KEY") ?? "";
-const provider = KEY ? aeroDataBox({ key: KEY, via: Deno.env.get("FLIGHTS_PROVIDER") === "rapidapi" ? "rapidapi" : "apimarket" }) : null;
+const SEC = secretSource(db, (k) => Deno.env.get(k) ?? "");
+let provider: ReturnType<typeof aeroDataBox> | null = null;
+let providerKey = "";
+/** The flights key may come from the dashboard secrets or from /conexion (Vault). */
+async function loadProvider() {
+  await SEC.refresh();
+  const key = SEC.get("FLIGHTS_API_KEY");
+  if (key !== providerKey) {
+    providerKey = key;
+    provider = key ? aeroDataBox({ key, via: SEC.get("FLIGHTS_PROVIDER") === "rapidapi" ? "rapidapi" : "apimarket" }) : null;
+  }
+}
 const CORS = {
   "access-control-allow-origin": Deno.env.get("ALLOWED_ORIGINS") ?? "*",
   "access-control-allow-headers": "authorization, content-type, apikey, x-client-info",
@@ -40,6 +51,7 @@ const cache: FlightCacheDb = {
 };
 
 Deno.serve(async (req) => {
+  await loadProvider();
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   const url = new URL(req.url);
   if (req.method === "POST" && url.pathname.endsWith("/track")) {

@@ -9,7 +9,7 @@
 //   POST /whatsapp/voice-tool   tools for the voice bot (LiveKit agent on the BCU server), per-call token
 // Voice bot secrets: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET (same LiveKit project as the agent),
 //                    optional VOICE_TOKEN_SECRET.
-// Secrets: WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_APP_SECRET, WHATSAPP_VERIFY_TOKEN,
+// Keys (Edge Function secrets, or saved by an admin on /conexion into Vault): WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_APP_SECRET, WHATSAPP_VERIFY_TOKEN,
 //          optional AI_API_KEY (+ AI_BASE_URL, AI_MODEL), WHATSAPP_TEMPLATES (JSON), PUBLIC_APP_URL.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
@@ -21,6 +21,8 @@ import type { NotificationContext, TemplateMap } from "../_shared/whatsapp/notif
 import { liveKitVoiceBot, voiceTool, type VoiceCall } from "../_shared/whatsapp/voice.ts";
 import { mintLiveKitToken } from "../_shared/domain/livekit.ts";
 import { graph, runSetup, type SetupAction } from "../_shared/whatsapp/setup.ts";
+import { sha256Hex } from "../_shared/domain/crypto.ts";
+import { secretSource } from "../_shared/secrets.ts";
 import { callAction, processOutbox, processWebhook, sendAndRecord, type CallRow, type ConversationRow, type ServiceDeps, type WaDb } from "../_shared/whatsapp/service.ts";
 
 function serviceKey(): string {
@@ -52,7 +54,8 @@ const log = (o: Record<string, unknown>) => console.log(JSON.stringify({ fn: "wh
 
 let envTemplates: TemplateMap = {};
 try { envTemplates = JSON.parse(env("WHATSAPP_TEMPLATES") || "{}"); } catch { log({ level: "warn", msg: "WHATSAPP_TEMPLATES is not valid JSON" }); }
-const TOKEN = env("WHATSAPP_ACCESS_TOKEN");
+const SEC = secretSource(db, env);
+const sec = (k: string) => SEC.get(k);
 
 /** Number ID, account ID and template names: secrets win; otherwise what the setup screen saved (refreshed every 30 s). */
 const RT: { phoneId: string; wabaId: string; templates: TemplateMap; at: number } = {
@@ -139,24 +142,29 @@ async function staffUser(req: Request) {
   return u?.user ?? null;
 }
 
-const configured = () => !!(TOKEN && RT.phoneId);
-const sender = { send: (to: string, m: Parameters<ReturnType<typeof graphSender>["send"]>[1]) => graphSender(RT.phoneId, TOKEN).send(to, m) };
-const ai = env("AI_API_KEY")
-  ? makeExtractor({ apiKey: env("AI_API_KEY"), baseUrl: env("AI_BASE_URL") || undefined, model: env("AI_MODEL") || undefined })
-  : null;
-
-const assistant = env("AI_API_KEY")
-  ? makeAssistant({ apiKey: env("AI_API_KEY"), baseUrl: env("AI_BASE_URL") || undefined, model: env("AI_MODEL") || undefined })
-  : null;
+const configured = () => !!(sec("WHATSAPP_ACCESS_TOKEN") && RT.phoneId);
+const sender = { send: (to: string, m: Parameters<ReturnType<typeof graphSender>["send"]>[1]) => graphSender(RT.phoneId, sec("WHATSAPP_ACCESS_TOKEN")).send(to, m) };
+/** AI helpers, rebuilt when the key changes (it may arrive later from /conexion). */
+const AI: { key: string; ai: ReturnType<typeof makeExtractor> | null; assistant: ReturnType<typeof makeAssistant> | null } = { key: "", ai: null, assistant: null };
+function aiNow() {
+  const key = sec("AI_API_KEY");
+  if (key !== AI.key) {
+    const c = { apiKey: key, baseUrl: sec("AI_BASE_URL") || undefined, model: sec("AI_MODEL") || undefined };
+    Object.assign(AI, { key, ai: key ? makeExtractor(c) : null, assistant: key ? makeAssistant(c) : null });
+  }
+  return AI;
+}
 
 const deps: ServiceDeps = {
-  db: waDb, store, sender, ai, assistant, log, statusTokenSecret: STATUS_SECRET, publicAppUrl: PUBLIC_APP_URL,
+  db: waDb, store, sender, log, statusTokenSecret: STATUS_SECRET, publicAppUrl: PUBLIC_APP_URL,
   get templates() { return RT.templates; },
-  get calls() { return configured() ? graphCalls(RT.phoneId, TOKEN) : undefined; },
+  get ai() { return aiNow().ai; },
+  get assistant() { return aiNow().assistant; },
+  get calls() { return configured() ? graphCalls(RT.phoneId, sec("WHATSAPP_ACCESS_TOKEN")) : undefined; },
   get voiceBot() {
-    return configured() && env("LIVEKIT_URL") && env("LIVEKIT_API_KEY") && env("LIVEKIT_API_SECRET")
-      ? liveKitVoiceBot({ url: env("LIVEKIT_URL"), apiKey: env("LIVEKIT_API_KEY"), apiSecret: env("LIVEKIT_API_SECRET"),
-          phoneNumberId: RT.phoneId, waToken: TOKEN })
+    return configured() && sec("LIVEKIT_URL") && sec("LIVEKIT_API_KEY") && sec("LIVEKIT_API_SECRET")
+      ? liveKitVoiceBot({ url: sec("LIVEKIT_URL"), apiKey: sec("LIVEKIT_API_KEY"), apiSecret: sec("LIVEKIT_API_SECRET"),
+          phoneNumberId: RT.phoneId, waToken: sec("WHATSAPP_ACCESS_TOKEN") })
       : undefined;
   },
   voiceSecret: env("VOICE_TOKEN_SECRET") || `voice:${KEY}`,
@@ -175,11 +183,11 @@ Deno.serve(async (req) => {
   const url = new URL(req.url);
   const path = url.pathname.replace(/\/+$/, "");
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
-  await refreshRuntime();
+  await Promise.all([refreshRuntime(), SEC.refresh()]);
 
   // --- Meta verification handshake
   if (req.method === "GET") {
-    const token = env("WHATSAPP_VERIFY_TOKEN");
+    const token = sec("WHATSAPP_VERIFY_TOKEN");
     if (url.searchParams.get("hub.mode") === "subscribe" && token && url.searchParams.get("hub.verify_token") === token) {
       return new Response(url.searchParams.get("hub.challenge") ?? "", { status: 200 });
     }
@@ -230,6 +238,24 @@ Deno.serve(async (req) => {
     return json(r.status, r.body);
   }
 
+  // --- First admin account from /conexion, behind a one-time setup code (only its hash is stored).
+  if (path.endsWith("/bootstrap-admin")) {
+    const body = await req.json().catch(() => ({}));
+    const email = String(body?.email ?? "").trim().toLowerCase();
+    const password = String(body?.password ?? "");
+    const code = String(body?.code ?? "").trim().toUpperCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return json(422, { error: { code: "invalid_email" } });
+    if (password.length < 10) return json(422, { error: { code: "weak_password" } });
+    const hash = await sha256Hex(`setup:${code}`);
+    if (!(await rpc<boolean>("setup_code_valid", { p_code_hash: hash }).catch(() => false))) return json(403, { error: { code: "invalid_code" } });
+    const { error } = await db.auth.admin.createUser({ email, password, email_confirm: true });
+    if (error && !/already|registered|exists/i.test(error.message)) return json(400, { error: { code: "create_failed", message: error.message } });
+    if (!(await rpc<boolean>("setup_code_redeem", { p_code_hash: hash, p_email: email }).catch(() => false))) return json(403, { error: { code: "invalid_code" } });
+    await rpc("setup_grant_admin", { p_email: email });
+    log({ level: "info", msg: "admin created from /conexion", existing: !!error });
+    return json(200, { ok: true, existing: !!error });
+  }
+
   // --- WhatsApp connection setup (Graph API with the stored token; the token never leaves the server).
   // Admin login for every step; the outbox key (server-to-server) for the steps that need no code or PIN.
   if (path.endsWith("/setup")) {
@@ -246,19 +272,19 @@ Deno.serve(async (req) => {
       if (!keyOk) return json(401, { error: { code: "unauthenticated" } });
       if (!["status", "use_number", "webhook", "calling", "templates"].includes(action)) return json(403, { error: { code: "admin_required" } });
     }
-    await refreshRuntime(true);
+    await Promise.all([refreshRuntime(true), SEC.refresh(true)]);
     const r = await runSetup(action, body?.args ?? {}, {
-      token: TOKEN, callbackUrl: `${SUPABASE_URL.replace(/\/$/, "")}/functions/v1/whatsapp`,
-      verifyToken: env("WHATSAPP_VERIFY_TOKEN"), wabaId: RT.wabaId, phoneNumberId: RT.phoneId,
-    }, graph(TOKEN));
+      token: sec("WHATSAPP_ACCESS_TOKEN"), callbackUrl: `${SUPABASE_URL.replace(/\/$/, "")}/functions/v1/whatsapp`,
+      verifyToken: sec("WHATSAPP_VERIFY_TOKEN"), wabaId: RT.wabaId, phoneNumberId: RT.phoneId,
+    }, graph(sec("WHATSAPP_ACCESS_TOKEN")));
     if (r.save) {
       await rpc("wa_runtime_set", { p_phone: r.save.phoneNumberId ?? null, p_waba: r.save.wabaId ?? null,
         p_templates: r.save.templates ?? null, p_user: userId });
       await refreshRuntime(true);
     }
     log({ level: r.ok ? "info" : "warn", setup: action, ok: r.ok, by: userId ? "admin" : "server" });
-    return json(r.status, { ...r.body, secrets: { accessToken: !!TOKEN, appSecret: !!env("WHATSAPP_APP_SECRET"), verifyToken: !!env("WHATSAPP_VERIFY_TOKEN"),
-      liveKit: !!(env("LIVEKIT_URL") && env("LIVEKIT_API_KEY") && env("LIVEKIT_API_SECRET")), ai: !!env("AI_API_KEY") },
+    return json(r.status, { ...r.body, secrets: { accessToken: !!sec("WHATSAPP_ACCESS_TOKEN"), appSecret: !!sec("WHATSAPP_APP_SECRET"), verifyToken: !!sec("WHATSAPP_VERIFY_TOKEN"),
+      liveKit: !!(sec("LIVEKIT_URL") && sec("LIVEKIT_API_KEY") && sec("LIVEKIT_API_SECRET")), ai: !!sec("AI_API_KEY") },
       connected: { phoneNumberId: RT.phoneId || null, wabaId: RT.wabaId || null, templates: Object.keys(RT.templates).length } });
   }
 
@@ -266,7 +292,7 @@ Deno.serve(async (req) => {
   if (path.endsWith("/call-join")) {
     const user = await staffUser(req);
     if (!user) return json(401, { error: { code: "unauthenticated" } });
-    const lk = { url: env("LIVEKIT_URL"), apiKey: env("LIVEKIT_API_KEY"), apiSecret: env("LIVEKIT_API_SECRET") };
+    const lk = { url: sec("LIVEKIT_URL"), apiKey: sec("LIVEKIT_API_KEY"), apiSecret: sec("LIVEKIT_API_SECRET") };
     if (!lk.url || !lk.apiKey || !lk.apiSecret) return json(503, { error: { code: "voice_not_configured" } });
     const body = await req.json().catch(() => ({}));
     const { data: row } = await db.from("wa_calls").select("operator_id").eq("id", String(body?.callId ?? "")).maybeSingle();
@@ -300,7 +326,7 @@ Deno.serve(async (req) => {
 
   // --- Meta webhook
   const raw = await req.text();
-  const secret = env("WHATSAPP_APP_SECRET");
+  const secret = sec("WHATSAPP_APP_SECRET");
   if (!secret) return json(503, { error: { code: "whatsapp_not_configured" } });
   if (!(await verifySignature(raw, req.headers.get("x-hub-signature-256"), secret))) {
     log({ level: "warn", msg: "bad signature" });

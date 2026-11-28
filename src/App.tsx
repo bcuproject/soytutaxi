@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, Route, Routes, useLocation } from "react-router-dom";
 import CentralPage from "./pages/CentralPage";
+import ConexionPage from "./pages/ConexionPage";
 import type { Locale } from "@shared/domain/types.ts";
 import { Button, DemoBanner, Logo } from "./components/ui";
 import { backend, type StaffSession } from "./lib/backend";
@@ -68,6 +69,7 @@ export default function App() {
         <Route path="/despacho" element={<DispatchPage />} />
         <Route path="/chofer" element={<DriverApp />} />
         <Route path="/central" element={<CentralPage />} />
+        <Route path="/conexion" element={<ConexionPage />} />
         <Route path="/despacho/nueva" element={<StaffOnly><div className="min-h-screen"><BookingPage staff /></div></StaffOnly>} />
         <Route path="*" element={<PassengerShell><div className="py-24 text-center text-ink-400">404</div></PassengerShell>} />
       </Routes>

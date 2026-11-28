@@ -4,6 +4,7 @@
 //   POST /payments/outbox                          refund worker, called by pg_cron (x-outbox-key)
 // Secrets: MP_ACCESS_TOKEN (TEST-… for sandbox), MP_WEBHOOK_SECRET, optional MP_COLLECTOR_ID, PUBLIC_APP_URL.
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { secretSource } from "../_shared/secrets.ts";
 import { ApiError } from "../_shared/api/store.ts";
 import { mercadoPago, verifyMpSignature } from "../_shared/payments/mercadopago.ts";
 import { checkout, notification, processPaymentJobs, type PayDb } from "../_shared/payments/service.ts";
@@ -21,6 +22,7 @@ function serviceKey(): string {
 const env = (k: string) => Deno.env.get(k) ?? "";
 const SUPABASE_URL = env("SUPABASE_URL");
 const db = createClient(SUPABASE_URL, serviceKey(), { auth: { persistSession: false } });
+const SEC = secretSource(db, env);
 const CORS = {
   "access-control-allow-origin": env("ALLOWED_ORIGINS") || "*",
   "access-control-allow-headers": "authorization, content-type, apikey, x-client-info",
@@ -59,13 +61,14 @@ const payDb: PayDb = {
 
 const deps = {
   db: payDb, log,
-  mp: env("MP_ACCESS_TOKEN") ? mercadoPago(env("MP_ACCESS_TOKEN")) : null,
+  get mp() { const t = SEC.get("MP_ACCESS_TOKEN"); return t ? mercadoPago(t) : null; },
   publicAppUrl: env("PUBLIC_APP_URL") || "https://bcuproject.github.io/soytutaxi",
   notificationUrl: `${SUPABASE_URL.replace(/\/$/, "")}/functions/v1/payments/webhook`,
-  collectorId: env("MP_COLLECTOR_ID") || null,
+  get collectorId() { return SEC.get("MP_COLLECTOR_ID") || null; },
 };
 
 Deno.serve(async (req) => {
+  await SEC.refresh();
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   if (req.method !== "POST") return json(405, { error: { code: "method_not_allowed" } });
   const url = new URL(req.url);
@@ -84,7 +87,7 @@ Deno.serve(async (req) => {
 
   if (path.endsWith("/webhook")) {
     const dataId = url.searchParams.get("data.id") ?? url.searchParams.get("id");
-    const ok = await verifyMpSignature(req.headers.get("x-signature"), req.headers.get("x-request-id"), dataId, env("MP_WEBHOOK_SECRET"));
+    const ok = await verifyMpSignature(req.headers.get("x-signature"), req.headers.get("x-request-id"), dataId, SEC.get("MP_WEBHOOK_SECRET"));
     if (!ok) { log({ level: "warn", msg: "bad signature" }); return json(401, { error: { code: "bad_signature" } }); }
     const body = await req.json().catch(() => ({}));
     try {
