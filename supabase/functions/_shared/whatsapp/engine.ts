@@ -94,6 +94,21 @@ export interface EngineResult {
 
 const FIELD_ORDER = ["direction", "airport", "zoneCode", "placeText", "date", "time", "flight", "passengers", "largeBags", "carryOn"] as const;
 const QUOTE_FIELDS: (keyof Draft)[] = ["direction", "airport", "zoneCode", "placeText", "lat", "lng", "date", "time", "flight", "passengers", "largeBags", "carryOn", "vehicleClass"];
+/** "pago online", "efectivo", "tarjeta", "1"… → one of the allowed payment modes, or null. */
+export function typedPayment(text: string, allowed: readonly string[]): PaymentMode | null {
+  const p = strip(text);
+  const num = /^\s*([1-3])\s*$/.exec(p);
+  if (num) return (allowed[+num[1] - 1] as PaymentMode) ?? null;
+  const want: PaymentMode | null =
+    /(online|on line|link|mercado ?pago|\bmp\b|internet|web|transfer|prepa)/.test(p) ? "prepaid" as PaymentMode
+    : /(efectivo|cash|plata|pesos|dolares|dollars)/.test(p) ? "pay_on_pickup_cash" as PaymentMode
+    : /(tarjeta|card|debito|credito|posnet)/.test(p) ? "pay_on_pickup_card" as PaymentMode
+    : null;
+  if (want && allowed.includes(want)) return want;
+  if (want === "pay_on_pickup_card" && allowed.includes("prepaid")) return "prepaid" as PaymentMode;   // "tarjeta" with no card-to-driver option
+  return null;
+}
+
 const YES = /^(si|sí|s|yes|y|ok|okay|dale|confirmo|confirmar|confirm|listo|perfecto|correcto|de una)[!. ]*$/;
 
 export async function handleMessage(conv: ConversationState, msg: InboundMessage, deps: EngineDeps): Promise<EngineResult> {
@@ -203,7 +218,14 @@ class Turn {
     // Free text
     const extracted = await this.understand();
     if (extracted.language && ["menu", "done"].includes(this.step) && !this.hasAnyField()) this.locale = extracted.language;
+    const stepBefore = this.step;
     const captured = this.applyStepText(extracted);
+    // Typed answers to the last two questions (name, payment) carry on with the booking, like the buttons do.
+    if (stepBefore === "name" && captured) return this.confirm();
+    if (stepBefore === "payment") {
+      if (!captured && !YES.test(plain)) this.textOut(this.t("payHint"));
+      return this.confirm();
+    }
     const changed = this.merge(extracted);
 
     if (["menu", "done", "handoff"].includes(this.step) && !changed && !captured) {
@@ -391,6 +413,11 @@ class Turn {
       case "name":
         if (t.length >= 2) { this.draft.name = t.slice(0, 120); return true; }
         return false;
+      case "payment": {
+        const m = typedPayment(t, this.deps.cfg.policy.config.allowed_payment_modes);
+        if (m) { this.draft.paymentMode = m; return true; }
+        return false;
+      }
       case "passengers": case "bags": case "carry": {
         const num = /^\s*(\d{1,2})\s*$/.exec(t);
         const key = this.step === "passengers" ? "passengers" : this.step === "bags" ? "largeBags" : "carryOn";

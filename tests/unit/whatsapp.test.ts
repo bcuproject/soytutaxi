@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { MemoryStore } from "@shared/api/memoryStore.ts";
 import type { Extractor } from "@shared/whatsapp/ai.ts";
-import { handleMessage, type ConversationState, type EngineDeps } from "@shared/whatsapp/engine.ts";
+import { handleMessage, typedPayment, type ConversationState, type EngineDeps } from "@shared/whatsapp/engine.ts";
 import { parseWebhook, previewOf, toGraphPayload, verifySignature, type InboundMessage, type Outbound } from "@shared/whatsapp/meta.ts";
 import { extractAll, parseDate, parseFlight, parseTime, parseZone } from "@shared/whatsapp/parse.ts";
 import { demoOperatorConfig } from "@shared/domain/fixtures.ts";
@@ -70,6 +70,33 @@ describe("WhatsApp booking — guided buttons", () => {
     const [b] = [...store.bookings.values()];
     expect(b).toMatchObject({ source: "whatsapp", state: "needs_driver", paymentMode: "prepaid", contact: { name: "Emma Wilson", phone: "+447700900123" } });
     expect(b.journey.flight?.designator).toBe("AR1303");
+  });
+
+  it("typed answers at the end finish the booking (no loop between summary and payment)", async () => {
+    conv.draft = { direction: "to_airport", airport: "AEP", zoneCode: "recoleta", placeText: "Alvear 1891", date: "2026-11-28", time: "08:00", passengers: 2, largeBags: 1, carryOn: 2 };
+    conv.step = "direction";
+    await send({ reply: "carry:2" });                       // → review (as in the 28/11 test chat)
+    expect(conv.step).toBe("review");
+    expect(ids(await send("confirmar"))).toEqual(["name:profile"]);
+    expect(ids(await send("nicolas"))).toEqual(["pay:prepaid", "pay:pay_on_pickup_cash"]);   // straight to payment, not the summary again
+    const unclear = all(await send("no sé"));
+    expect(unclear).toContain("escribí *online* o *efectivo*");
+    expect(conv.step).toBe("payment");
+    const done = all(await send("pagon online"));
+    expect(done).toMatch(/Recibimos tu solicitud STT-[A-Z0-9]{6}/);
+    expect(conv.step).toBe("done");
+    expect([...store.bookings.values()].at(-1)).toMatchObject({ paymentMode: "prepaid", contact: { name: "nicolas" } });
+  });
+
+  it("reads typed payment choices", () => {
+    const both = ["prepaid", "pay_on_pickup_cash"];
+    expect(typedPayment("pago online", both)).toBe("prepaid");
+    expect(typedPayment("Mercado Pago", both)).toBe("prepaid");
+    expect(typedPayment("efectivo", both)).toBe("pay_on_pickup_cash");
+    expect(typedPayment("cash", both)).toBe("pay_on_pickup_cash");
+    expect(typedPayment("2", both)).toBe("pay_on_pickup_cash");
+    expect(typedPayment("tarjeta", both)).toBe("prepaid");
+    expect(typedPayment("hola", both)).toBeNull();
   });
 
   it("a second tap on Confirm does not create a second booking", async () => {
