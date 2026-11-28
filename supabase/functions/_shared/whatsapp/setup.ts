@@ -64,6 +64,8 @@ export const TEMPLATES: { kind: string; name: string; category: "UTILITY"; body:
   { kind: "notify.driver.offer", name: "stt_driver_offer_v2", category: "UTILITY",
     body: "🚕 Viaje disponible {{1}}: {{2}}. Ganancia {{3}}. Aceptalo con el botón o desde la app de choferes.",
     example: ["STT-AB12CD", "sábado 28/11, 10:30", "$ 35.000"] , buttons: ["Aceptar", "Rechazar"] },
+  { kind: "notify.staff.message", name: "stt_staff_message", category: "UTILITY",
+    body: "Mensaje de SoyTuTaxi sobre tu reserva {{1}}: {{2}} Si necesitás algo, respondé a este mensaje.", example: ["STT-AB12CD", "Tu chofer llega en 10 minutos."] },
   { kind: "notify.driver.assigned", name: "stt_driver_assigned", category: "UTILITY",
     body: "Tenés asignado el viaje {{1}} del {{2}}. Los detalles están en la app de choferes.", example: ["STT-AB12CD", "sábado 28/11, 10:30"] },
   { kind: "notify.driver.pickup_changed", name: "stt_driver_pickup_changed", category: "UTILITY",

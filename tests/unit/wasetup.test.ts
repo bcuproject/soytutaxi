@@ -114,7 +114,7 @@ describe("templates match what the notifier sends", () => {
       "notify.passenger.confirmed": 5, "notify.passenger.cancelled": 1, "notify.passenger.payment_due": 4,
       "notify.passenger.pickup_changed": 3, "notify.passenger.reminder": 3, "notify.passenger.rating": 1,
       "notify.passenger.refund": 1, "notify.driver.offer": 3, "notify.driver.assigned": 2,
-      "notify.driver.pickup_changed": 2, "notify.driver.released": 2,
+      "notify.driver.pickup_changed": 2, "notify.driver.released": 2, "notify.staff.message": 2,
     };
     for (const t of TEMPLATES) {
       const n = new Set(t.body.match(/\{\{\d+\}\}/g)).size;

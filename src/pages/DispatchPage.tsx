@@ -261,6 +261,55 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
   );
 }
 
+/** WhatsApp message from dispatch to this booking's passenger. Replies land in the WhatsApp tab, handled by whoever sent it. */
+function PassengerMessage({ r, onClose }: { r: DispatchRow; onClose: () => void }) {
+  const first = r.passengerName.split(" ")[0];
+  const quick = [
+    `Hola ${first}, tu chofer ya está en camino.`,
+    `Hola ${first}, tu chofer llegó al punto de encuentro.`,
+    `Hola ${first}, vimos que tu vuelo viene demorado: ajustamos la búsqueda, no te preocupes.`,
+    `Hola ${first}, ¿nos confirmás la dirección exacta de búsqueda?`,
+  ];
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  async function send() {
+    const t = text.trim(); if (!t) return;
+    setBusy(true); setErr(null); setDone(null);
+    try {
+      const res = await backend.waMessageBooking(r.id, t);
+      // The passenger's answer should reach a person, not the bot.
+      await backend.waTakeover(res.conversationId, true).catch(() => {});
+      setDone(res.mode === "template" ? "Enviado como mensaje oficial (el pasajero no escribió en las últimas 24 h)." : "Enviado por WhatsApp.");
+      setText("");
+    } catch (e) {
+      setErr(e instanceof CommandError ? (e.message && e.message !== e.code ? e.message : ERR_ES[e.code] ?? e.code) : (e as Error).message);
+    } finally { setBusy(false); }
+  }
+  return (
+    <section className="mt-4 rounded-2xl border border-cab-500/30 bg-ink-900 p-4" data-testid="passenger-message">
+      <div className="mb-2 flex items-center gap-2">
+        <h3 className="text-sm font-semibold">💬 WhatsApp a {r.passengerName}</h3>
+        <span className="text-xs text-ink-400">{r.passengerPhone}</span>
+        <button onClick={onClose} className="ml-auto text-xs text-ink-400 hover:text-white">Cerrar</button>
+      </div>
+      <div className="mb-2 flex flex-wrap gap-1.5">
+        {quick.map((q) => <button key={q} onClick={() => setText(q)} className="rounded-full bg-ink-800 px-2.5 py-1 text-[11px] text-ink-200 hover:bg-ink-700">{q.replace(/^Hola [^,]+, /, "")}</button>)}
+      </div>
+      <textarea value={text} onChange={(e) => setText(e.target.value)} maxLength={900} rows={3} placeholder="Escribí el mensaje…"
+        onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send(); }}
+        className="w-full rounded-xl border border-ink-700 bg-ink-950 px-3 py-2 text-sm text-white placeholder:text-ink-500 focus:border-cab-500 focus:outline-none" data-testid="passenger-message-text" />
+      <div className="mt-2 flex items-center gap-3">
+        <Button onClick={send} disabled={busy || !text.trim()} className="py-2" data-testid="passenger-message-send">{busy ? "Enviando…" : "Enviar"}</Button>
+        <span className="text-[11px] text-ink-400">La respuesta del pasajero llega a la pestaña WhatsApp, a tu nombre.</span>
+      </div>
+      {done && <p className="mt-2 text-sm text-emerald-300" role="status">✓ {done}</p>}
+      {err && <p className="mt-2 text-sm text-red-300" role="alert">{err}</p>}
+    </section>
+  );
+}
+
 function Stat({ n, label, tone = "text-white" }: { n: number; label: string; tone?: string }) {
   return <span className="text-sm text-ink-400"><span className={cx("mr-1 text-lg font-semibold tabular-nums", tone)}>{n}</span>{label}</span>;
 }
@@ -443,6 +492,8 @@ function BookingsGrid({ rows, onSelect }: { rows: DispatchRow[]; onSelect: (r: D
 
 // ------------------------------------------------------------------------- detail drawer
 const ERR_ES: Record<string, string> = {
+  no_phone: "La reserva no tiene teléfono.", template_not_approved: "La plantilla de mensajes todavía no está aprobada por Meta.",
+  template_missing: "Falta la plantilla de mensajes.", whatsapp_not_configured: "WhatsApp no está conectado.",
   stale_version: "La reserva cambió mientras la mirabas. Se actualizó; revisá y probá de nuevo.",
   schedule_conflict: "Ese chofer o vehículo ya tiene un viaje que se superpone.",
   already_assigned: "La reserva ya tiene chofer.", vehicle_too_small: "El vehículo no alcanza para pasajeros o equipaje.",
@@ -536,6 +587,8 @@ function BookingActions({ r, drivers, board, onChanged }: { r: DispatchRow; driv
 
 function BookingDrawer({ row: r, drivers, board, onChanged, onClose }: { row: DispatchRow; drivers: Driver[]; board: BoardRow[]; onChanged: () => void; onClose: () => void }) {
   const [events, setEvents] = useState<TripEvent[]>([]);
+  const [msgOpen, setMsgOpen] = useState(false);
+  useEffect(() => { setMsgOpen(false); }, [r.id]);
   useEffect(() => { backend.tripEvents(r.id).then(setEvents).catch(() => setEvents([])); }, [r.id, r.version, r.state]);
   useEffect(() => {
     const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -564,12 +617,19 @@ function BookingDrawer({ row: r, drivers, board, onChanged, onClose }: { row: Di
           <div className={item}><dt className="text-ink-400">{L.flight}</dt><dd><span className="font-mono">{r.flightDesignator ? `${r.flightDesignator} · llegada ${r.flightLocalArrivalDate}` : r.flightExceptionReason ? `Excepción: ${r.flightExceptionReason}` : "—"}</span>
             {r.flightDesignator && <FlightLine r={r} />}</dd></div>
           <div className={item}><dt className="text-ink-400">{L.vehicle}</dt><dd>{VC_ES[r.vehicleClass]} · {r.passengers} pax · {r.largeBags} valijas · {r.carryOn} mano</dd></div>
-          <div className={item}><dt className="text-ink-400">{L.passenger}</dt><dd>{r.passengerName}<div className="text-xs text-ink-300">{[r.passengerPhone, r.passengerEmail].filter(Boolean).join(" · ")}</div></dd></div>
+          <div className={item}><dt className="text-ink-400">{L.passenger}</dt><dd>
+            {r.passengerPhone ? (
+              <button onClick={() => setMsgOpen((o) => !o)} className="text-left font-medium text-cab-300 underline decoration-dotted underline-offset-4 hover:text-cab-200" data-testid="passenger-message-open" title="Mandar un WhatsApp al pasajero">
+                {r.passengerName} 💬
+              </button>
+            ) : r.passengerName}
+            <div className="text-xs text-ink-300">{[r.passengerPhone, r.passengerEmail].filter(Boolean).join(" · ")}</div></dd></div>
           <div className={item}><dt className="text-ink-400">{L.money}</dt><dd>{r.amountMinor !== null ? formatMoney(r.amountMinor, r.currency!, "es-AR") : "—"} · {PAY_ES[r.paymentMode]} ({COLLECT_ES[r.collectionState] || "—"})</dd></div>
           <div className={item}><dt className="text-ink-400">{L.driver}</dt><dd>{r.driverName ? `${r.driverName} · ${r.vehiclePlate}` : "Sin asignar"}{r.holdExpiresAt && <div className="text-xs text-sky-300">Hold hasta {fmtTime(r.holdExpiresAt)}</div>}</dd></div>
           {r.notes && <div className={item}><dt className="text-ink-400">{L.notes}</dt><dd>{r.notes}</dd></div>}
         </dl>
 
+        {msgOpen && r.passengerPhone && <PassengerMessage r={r} onClose={() => setMsgOpen(false)} />}
         {r.proposedPickupAt && <PickupProposal r={r} onChanged={onChanged} />}
         <PaymentBox r={r} onChanged={onChanged} />
         <AccountBox r={r} onChanged={onChanged} />

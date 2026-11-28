@@ -3,6 +3,7 @@
 //   POST /whatsapp              Meta webhook: X-Hub-Signature-256 checked with WHATSAPP_APP_SECRET
 //   POST /whatsapp/outbox       notification worker, called every minute by pg_cron (x-outbox-key)
 //   POST /whatsapp/staff-send   staff reply from the inbox (Supabase access token; admin, dispatcher or agent)
+//   POST /whatsapp/staff-message  staff message to a booking's passenger (text inside 24 h, template otherwise)
 //   POST /whatsapp/call-action  answer (SDP), reject or hang up a WhatsApp voice call (same staff check)
 //   POST /whatsapp/setup        WhatsApp connection setup (admin login; outbox key for no-code steps)
 //   POST /whatsapp/call-join    take a call Sofía is transferring: LiveKit token for that call's room (staff)
@@ -16,7 +17,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import { ApiError } from "../_shared/api/store.ts";
 import { SupabaseStore } from "../_shared/api/supabaseStore.ts";
 import { makeAssistant, makeExtractor } from "../_shared/whatsapp/ai.ts";
-import { graphCalls, graphSender, parseWebhook, verifySignature } from "../_shared/whatsapp/meta.ts";
+import { graphCalls, graphSender, parseWebhook, verifySignature, type Outbound } from "../_shared/whatsapp/meta.ts";
 import type { NotificationContext, TemplateMap } from "../_shared/whatsapp/notify.ts";
 import { liveKitVoiceBot, voiceTool, type VoiceCall } from "../_shared/whatsapp/voice.ts";
 import { mintLiveKitToken } from "../_shared/domain/livekit.ts";
@@ -308,6 +309,40 @@ Deno.serve(async (req) => {
     const token = await mintLiveKitToken({ apiKey: lk.apiKey, apiSecret: lk.apiSecret, identity: `desk-${user.id}`,
       name: `Central (${user.email?.split("@")[0] ?? "staff"})`, room: c.bot_room, canPublish: true, ttlSeconds: 3600, metadata: { kind: "desk" } });
     return json(200, { url: lk.url, token, room: c.bot_room });
+  }
+
+  // --- Staff message to a booking's passenger (from the booking in Despacho). Inside 24 h of the passenger's last
+  //     message it's a normal message; otherwise it goes as the approved "stt_staff_message" template.
+  if (path.endsWith("/staff-message")) {
+    const user = await staffUser(req);
+    if (!user) return json(401, { error: { code: "unauthenticated" } });
+    const body = await req.json().catch(() => ({}));
+    const text = String(body?.text ?? "").trim();
+    if (!body?.bookingId || !text || text.length > 900) return json(400, { error: { code: "invalid_request" } });
+    const { data: b } = await db.from("dispatch_booking_rows").select("id, operator_id, reference, passenger_phone").eq("id", body.bookingId).maybeSingle();
+    if (!b) return json(404, { error: { code: "booking_not_found" } });
+    if (!(await staffOf(user.id, b.operator_id))) return json(403, { error: { code: "forbidden" } });
+    const wa = String(b.passenger_phone ?? "").replace(/\D/g, "");
+    if (wa.length < 8) return json(422, { error: { code: "no_phone", message: "La reserva no tiene teléfono." } });
+    if (!configured()) return json(503, { error: { code: "whatsapp_not_configured" } });
+    const convId = await deps.db.openConversationForNotify(b.operator_id, wa);
+    if (!convId) return json(500, { error: { code: "conversation_failed" } });
+    const { data: c } = await db.from("wa_conversations").select("id, wa_id, last_inbound_at").eq("id", convId).maybeSingle();
+    const open = !!c?.last_inbound_at && Date.now() - new Date(c.last_inbound_at).getTime() < 24 * 3600_000;
+    let m: Outbound;
+    if (open) m = { type: "text", text };
+    else {
+      const tpl = RT.templates["notify.staff.message"];
+      if (!tpl) return json(409, { error: { code: "template_missing", message: "Falta la plantilla stt_staff_message (Conexión → plantillas)." } });
+      m = { type: "template", name: tpl.name, language: tpl.language, params: [b.reference, text.replace(/\s+/g, " ").slice(0, 900)] };
+    }
+    const r = await sendAndRecord(deps, convId, c?.wa_id ?? wa, m, user.id);
+    if (r.error) {
+      const pending = /132001|132000|template/i.test(r.error) && !open;
+      return json(502, { error: { code: pending ? "template_not_approved" : "send_failed",
+        message: pending ? "El pasajero no escribió en las últimas 24 h y la plantilla todavía no está aprobada por Meta." : r.error } });
+    }
+    return json(200, { id: r.id, conversationId: convId, mode: open ? "text" : "template" });
   }
 
   // --- Staff reply from the inbox

@@ -84,6 +84,14 @@ await page.screenshot({ path: `${SHOTS}/6-grid.png` });
 await clickText("td", "STT-DEM004");
 await page.waitForSelector('[role="dialog"]');
 assert(await page.$eval('[role="dialog"]', (d) => d.innerText.includes("silla de ruedas")), "drawer shows notes");
+// Message the passenger from the booking
+await page.click('[data-testid="passenger-message-open"]');
+await page.waitForSelector('[data-testid="passenger-message"]');
+await page.type('[data-testid="passenger-message-text"]', "Hola, tu chofer ya está en camino.");
+await page.click('[data-testid="passenger-message-send"]');
+await page.waitForFunction(() => document.querySelector('[data-testid="passenger-message"]')?.innerText.includes("Enviado"));
+assert(true, "dispatcher sends a WhatsApp to the passenger from the booking");
+await page.screenshot({ path: `${SHOTS}/7a-passenger-message.png` });
 await page.screenshot({ path: `${SHOTS}/7-drawer.png` });
 await page.keyboard.press("Escape");
 

@@ -1374,6 +1374,13 @@ var TEMPLATES = [
     buttons: ["Aceptar", "Rechazar"]
   },
   {
+    kind: "notify.staff.message",
+    name: "stt_staff_message",
+    category: "UTILITY",
+    body: "Mensaje de SoyTuTaxi sobre tu reserva {{1}}: {{2}} Si necesit\xE1s algo, respond\xE9 a este mensaje.",
+    example: ["STT-AB12CD", "Tu chofer llega en 10 minutos."]
+  },
+  {
     kind: "notify.driver.assigned",
     name: "stt_driver_assigned",
     category: "UTILITY",
@@ -3752,6 +3759,39 @@ Deno.serve(async (req) => {
       metadata: { kind: "desk" }
     });
     return json(200, { url: lk.url, token, room: c.bot_room });
+  }
+  if (path.endsWith("/staff-message")) {
+    const user = await staffUser(req);
+    if (!user) return json(401, { error: { code: "unauthenticated" } });
+    const body2 = await req.json().catch(() => ({}));
+    const text = String(body2?.text ?? "").trim();
+    if (!body2?.bookingId || !text || text.length > 900) return json(400, { error: { code: "invalid_request" } });
+    const { data: b } = await db.from("dispatch_booking_rows").select("id, operator_id, reference, passenger_phone").eq("id", body2.bookingId).maybeSingle();
+    if (!b) return json(404, { error: { code: "booking_not_found" } });
+    if (!await staffOf(user.id, b.operator_id)) return json(403, { error: { code: "forbidden" } });
+    const wa = String(b.passenger_phone ?? "").replace(/\D/g, "");
+    if (wa.length < 8) return json(422, { error: { code: "no_phone", message: "La reserva no tiene tel\xE9fono." } });
+    if (!configured()) return json(503, { error: { code: "whatsapp_not_configured" } });
+    const convId = await deps.db.openConversationForNotify(b.operator_id, wa);
+    if (!convId) return json(500, { error: { code: "conversation_failed" } });
+    const { data: c } = await db.from("wa_conversations").select("id, wa_id, last_inbound_at").eq("id", convId).maybeSingle();
+    const open = !!c?.last_inbound_at && Date.now() - new Date(c.last_inbound_at).getTime() < 24 * 36e5;
+    let m;
+    if (open) m = { type: "text", text };
+    else {
+      const tpl = RT.templates["notify.staff.message"];
+      if (!tpl) return json(409, { error: { code: "template_missing", message: "Falta la plantilla stt_staff_message (Conexi\xF3n \u2192 plantillas)." } });
+      m = { type: "template", name: tpl.name, language: tpl.language, params: [b.reference, text.replace(/\s+/g, " ").slice(0, 900)] };
+    }
+    const r = await sendAndRecord(deps, convId, c?.wa_id ?? wa, m, user.id);
+    if (r.error) {
+      const pending = /132001|132000|template/i.test(r.error) && !open;
+      return json(502, { error: {
+        code: pending ? "template_not_approved" : "send_failed",
+        message: pending ? "El pasajero no escribi\xF3 en las \xFAltimas 24 h y la plantilla todav\xEDa no est\xE1 aprobada por Meta." : r.error
+      } });
+    }
+    return json(200, { id: r.id, conversationId: convId, mode: open ? "text" : "template" });
   }
   if (path.endsWith("/staff-send")) {
     const user = await staffUser(req);

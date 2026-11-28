@@ -106,6 +106,8 @@ export interface Backend {
   waMessages(conversationId: string): Promise<WaMessage[]>;
   waTakeover(conversationId: string, take: boolean): Promise<void>;
   waSend(conversationId: string, text: string): Promise<void>;
+  /** Staff → a booking's passenger on WhatsApp (normal message inside 24 h, approved template otherwise). */
+  waMessageBooking(bookingId: string, text: string): Promise<{ conversationId: string; mode: "text" | "template" }>;
 
   // --- Booking desk (Central de reservas) ---------------------------------------------------------
   deskMode(): Promise<DeskMode>;
@@ -545,6 +547,21 @@ class DemoBackend implements Backend {
     (this.wa.msgs[id] ??= []).push({ id: `m${Date.now()}`, direction: "out", kind: "text", preview: text, status: "sent", error: null, staff: true, at });
     Object.assign(c, { lastPreview: text, lastDirection: "out", lastAt: at });
   }
+  async waMessageBooking(bookingId: string, text: string) {
+    const r = this.store.dispatchRows().find((x) => x.id === bookingId);
+    if (!r?.passengerPhone) throw new CommandError("no_phone", "La reserva no tiene teléfono.");
+    let c = this.wa.convs.find((x) => x.phone === r.passengerPhone);
+    if (!c) {
+      const now = new Date().toISOString();
+      c = { id: `c${Date.now()}`, waId: r.passengerPhone.replace(/\D/g, ""), phone: r.passengerPhone, name: r.passengerName, kind: "passenger", locale: r.locale,
+        step: "menu", needsStaff: false, handoffOwner: null, handledByMe: false, windowOpen: false, version: 1,
+        lastBookingRef: r.reference, lastPreview: null, lastDirection: null, lastAt: null, updatedAt: now };
+
+      this.wa.convs.push(c!);
+    }
+    await this.waSend(c!.id, text);
+    return { conversationId: c!.id, mode: "text" as const };
+  }
 }
 
 /** Demo flight tracking: STT-DEM001's flight is late (pickup change waiting for approval), STT-DEM004 is on time. */
@@ -751,6 +768,17 @@ class SupabaseBackend implements Backend {
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new CommandError(body?.error?.code ?? "send_failed", body?.error?.message);
+  }
+  async waMessageBooking(bookingId: string, text: string) {
+    const { data } = await this.sb.auth.getSession();
+    if (!data.session) throw new CommandError("unauthenticated");
+    const res = await fetch(`${this.url}/functions/v1/whatsapp/staff-message`, {
+      method: "POST", headers: { apikey: this.anonKey, authorization: `Bearer ${data.session.access_token}`, "content-type": "application/json" },
+      body: JSON.stringify({ bookingId, text }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new CommandError(body?.error?.code ?? "send_failed", body?.error?.message);
+    return { conversationId: String(body.conversationId), mode: body.mode === "template" ? "template" as const : "text" as const };
   }
   async deskMode(): Promise<DeskMode> {
     const { data } = await this.sb.from("desk_settings").select("mode").maybeSingle();
