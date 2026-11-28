@@ -175,6 +175,29 @@ assert(await page.$eval('[data-testid="reports"]', (e) => /por canal/i.test(e.in
 await page.screenshot({ path: `${SHOTS}/16-reports.png`, fullPage: true });
 await clickText('[role="tab"]', "Agenda");
 
+// Calls in Despacho: 3-way switch; answering pops the booking form (caller prefilled) next to the caller's history
+await page.click('[data-testid="call-mode"] [data-mode="smart"]');
+await page.waitForSelector('[data-testid="ring-seconds"]');
+assert(true, "Despacho can switch calls to Central + Sofía back-up (ring time shown)");
+await page.click('[data-testid="call-mode"] [data-mode="desk"]');
+await page.click('[data-testid="simulate-call"]');
+await page.waitForSelector('[data-testid="call-ringing"]');
+await clickText('[data-testid="call-ringing"] button', "Atender");
+await page.waitForSelector('[data-testid="call-sheet"] [data-testid="zone"]');
+await page.select('[data-testid="call-sheet"] [data-testid="zone"]', "recoleta");
+await page.type('[data-testid="call-sheet"] [data-testid="address"]', "Av. Alvear 1891");
+await page.type('[data-testid="call-sheet"] [data-testid="flight"]', "LA4521");
+await page.click('[data-testid="call-sheet"] [data-testid="get-quote"]');
+await page.waitForSelector('[data-testid="call-sheet"] [data-testid="submit-booking"]');
+assert(await page.$eval('[data-testid="call-sheet"] input[type="tel"]', (e) => e.value === "+5491155550002")
+  && await page.$eval('[data-testid="call-sheet"] input[autocomplete="name"]', (e) => e.value === "Familia Pereyra"), "answering in Despacho opens the booking form with the caller filled in");
+await page.waitForFunction(() => document.querySelector('[data-testid="call-sheet-history"]')?.innerText.includes("STT-DEM002"));
+assert(true, "the caller's history shows next to the form");
+await page.screenshot({ path: `${SHOTS}/7d-call-sheet.png` });
+await clickText('[data-testid="call-sheet"] button', "Cerrar");
+await clickText("button", "Colgar");
+await page.waitForFunction(() => !document.body.innerText.includes("En llamada ·"));
+
 // Central de reservas: manual mode, a WhatsApp call, a booking taken during the call, sent to dispatch
 await clickText("a", "Central");
 await page.waitForSelector('[data-testid="desk-mode"]');
@@ -210,7 +233,7 @@ await page.click(`[data-testid="desk-${deskRef}"] [data-testid="send-board"]`);
 await page.waitForFunction((r) => document.body.innerText.includes(`${r} enviada a despacho`), {}, deskRef);
 assert(!(await page.$(`[data-testid="desk-${deskRef}"]`)), "sent to dispatch (job board) and left the queue");
 // Voice bot mode: Sofía answers; what she can't solve lands under "Para devolver la llamada"
-await clickText('[data-testid="call-mode"] button', "Bot");
+await page.click('[data-testid="call-mode"] [data-mode="bot"]');
 await page.waitForFunction(() => document.body.innerText.includes("atiende Sofía"));
 await page.click('[data-testid="simulate-call"]');
 await page.waitForSelector('[data-testid="transfer-card"]');

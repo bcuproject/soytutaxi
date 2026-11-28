@@ -1,14 +1,16 @@
 // Central de reservas (booking desk): where every booking arrives (web, WhatsApp bot, calls, staff),
 // where agents answer WhatsApp calls and chats, take bookings by phone, and hand bookings to dispatch.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Badge, Button, Logo } from "../components/ui";
 import { CallPanel, useCalls } from "../components/CallPanel";
 import { TransferCalls } from "../components/TransferCalls";
+import { CallerHistory } from "../components/CallerHistory";
+import { CallModeSwitch } from "../components/CallDesk";
 import { WhatsAppInbox } from "../components/WhatsAppInbox";
 import { NewBookingsBell } from "../components/NewBookings";
 import { useNavigate } from "react-router-dom";
-import { backend, CommandError, type CallMode, type DeskMethod, type DeskMode, type DispatchRow, type PastCall, type StaffSession, type WaCall } from "../lib/backend";
+import { backend, CommandError, type CallMode, type CallSettings, type DeskMethod, type DeskMode, type DispatchRow, type PastCall, type StaffSession, type WaCall } from "../lib/backend";
 import { cx, fmtDateTime, fmtTime, formatMoney } from "../lib/format";
 import { LocaleContext, makeT } from "../lib/i18n";
 import BookingPage from "./BookingPage";
@@ -47,7 +49,7 @@ type Tab = "incoming" | "whatsapp" | "calls" | "new";
 function Central({ session, onSignOut }: { session: StaffSession; onSignOut: () => void }) {
   const [tab, setTab] = useState<Tab>("incoming");
   const [mode, setMode] = useState<DeskMode>("auto");
-  const [callMode, setCallModeState] = useState<{ mode: CallMode; voiceId: string | null }>({ mode: "desk", voiceId: null });
+  const [callMode, setCallModeState] = useState<CallSettings>({ mode: "desk", voiceId: null, ringSeconds: 20 });
   const [rows, setRows] = useState<DispatchRow[]>([]);
   const [waPending, setWaPending] = useState(0);
   const [err, setErr] = useState<string | null>(null);
@@ -61,6 +63,15 @@ function Central({ session, onSignOut }: { session: StaffSession; onSignOut: () 
     setHistory({ call: c, rows, calls });
   };
   const { calls, reload: reloadCalls } = useCalls();
+  // Answering a call opens the booking form for that caller, with their history, by itself (once per call).
+  const myCall = calls.find((c) => (c.status === "active" || c.status === "answering") && c.answeredByMe) ?? null;
+  const popped = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!myCall || popped.current.has(myCall.id)) return;
+    popped.current.add(myCall.id);
+    startBooking(myCall);
+    showHistory(myCall);
+  }, [myCall?.id]);
 
   const load = useCallback(async () => {
     try {
@@ -87,11 +98,13 @@ function Central({ session, onSignOut }: { session: StaffSession; onSignOut: () 
   const held = useMemo(() => rows.filter((r) => r.deskHold && r.state !== "cancelled"), [rows]);
   const recent = useMemo(() => rows.filter((r) => !r.deskHold), [rows]);
   const missed = calls.filter((c) => (c.status === "missed" && Date.now() - new Date(c.startedAt).getTime() < 6 * 3600_000) || (c.wantsCallback && !c.callbackDoneAt)).length;
-  async function switchCalls(m: CallMode, voiceId?: string | null) {
+  async function switchCalls(m: CallMode, voiceId?: string | null, ringSeconds?: number) {
     try {
-      await backend.setCallMode(m, voiceId);
-      setCallModeState((c) => ({ mode: m, voiceId: voiceId ?? c.voiceId }));
-      setFlash(m === "bot" ? "Las llamadas de WhatsApp las atiende Sofía (bot de voz). Si no está disponible, suenan acá." : "Las llamadas de WhatsApp suenan en la Central.");
+      await backend.setCallMode(m, voiceId, ringSeconds);
+      setCallModeState((c) => ({ mode: m, voiceId: voiceId ?? c.voiceId, ringSeconds: ringSeconds ?? c.ringSeconds }));
+      setFlash(m === "bot" ? "Las llamadas de WhatsApp las atiende Sofía (bot de voz). Si no está disponible, suenan acá."
+        : m === "smart" ? `Las llamadas suenan acá primero. Si están todos ocupados, o nadie atiende en ${ringSeconds ?? callMode.ringSeconds} s, atiende Sofía.`
+        : "Las llamadas de WhatsApp suenan en la Central.");
     } catch (e) { setErr(e instanceof CommandError ? ERR[e.code] ?? e.message : (e as Error).message); }
   }
 
@@ -143,17 +156,7 @@ function Central({ session, onSignOut }: { session: StaffSession; onSignOut: () 
                 ))}
               </div>
             </div>
-            <div className="flex items-center gap-2" title="Quién atiende las llamadas de WhatsApp">
-              <span className="text-xs text-ink-400">Llamadas</span>
-              <div className="flex rounded-lg bg-ink-900 p-1" role="radiogroup" aria-label="Quién atiende" data-testid="call-mode">
-                {(["desk", "bot"] as const).map((m) => (
-                  <button key={m} role="radio" aria-checked={callMode.mode === m} onClick={() => callMode.mode !== m && switchCalls(m)}
-                    className={cx("rounded-md px-3 py-1 text-xs font-semibold", callMode.mode === m ? (m === "bot" ? "bg-sky-600 text-white" : "bg-emerald-600 text-white") : "text-ink-400 hover:text-white")}>
-                    {m === "bot" ? "🤖 Bot" : "👤 Central"}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <CallModeSwitch settings={callMode} onChange={(m, ring) => switchCalls(m, null, ring)} />
             {backend.simulateCall && <Button variant="outline" className="py-1.5 text-xs" onClick={() => backend.simulateCall!()} data-testid="simulate-call">📞 Simular llamada</Button>}
             <NewBookingsBell onOpen={openNew} />
             <Link to="/despacho" className="text-ink-300 hover:text-white">Despacho →</Link>
@@ -268,7 +271,7 @@ function Central({ session, onSignOut }: { session: StaffSession; onSignOut: () 
 }
 
 function CallsLog({ calls, onBook, callMode, onVoice, onDone, onChat }: {
-  calls: WaCall[]; onBook: (c: WaCall) => void; callMode: { mode: CallMode; voiceId: string | null };
+  calls: WaCall[]; onBook: (c: WaCall) => void; callMode: CallSettings;
   onVoice: (voiceId: string) => void; onDone: (c: WaCall) => void; onChat: (c: WaCall) => void;
 }) {
   const ST: Record<string, [string, string]> = {
@@ -281,10 +284,11 @@ function CallsLog({ calls, onBook, callMode, onVoice, onDone, onChat }: {
     <div className="space-y-4">
       <div className="rounded-2xl border border-ink-800 bg-ink-900 p-4 text-sm">
         <div className="flex flex-wrap items-center gap-3">
-          <span className="font-semibold">{callMode.mode === "bot" ? "🤖 Atiende Sofía, el bot de voz" : "👤 Las llamadas suenan en la Central"}</span>
+          <span className="font-semibold">{callMode.mode === "bot" ? "🤖 Atiende Sofía, el bot de voz" : callMode.mode === "smart" ? "👤→🤖 Central primero, Sofía de respaldo" : "👤 Las llamadas suenan en la Central"}</span>
           <span className="text-ink-400">{callMode.mode === "bot"
             ? "Cotiza, reserva, informa el estado de las reservas y responde dudas. Lo que no puede resolver te lo deja abajo para devolver la llamada."
-            : "Cambiá a 🤖 Bot arriba a la derecha para que Sofía atienda las llamadas."}</span>
+            : callMode.mode === "smart" ? `Suenan acá. Si todos están en otra llamada, o nadie atiende en ${callMode.ringSeconds} s, atiende Sofía.`
+            : "Elegí 👤→🤖 o 🤖 arriba a la derecha para que Sofía atienda cuando no puedan, o siempre."}</span>
         </div>
         <form className="mt-3 flex flex-wrap items-center gap-2" onSubmit={(e) => { e.preventDefault(); if (voice.trim()) onVoice(voice.trim()); }}>
           <label className="text-xs text-ink-400" htmlFor="fish-voice">Voz de Fish Audio (ID)</label>
@@ -345,44 +349,3 @@ function CallsLog({ calls, onBook, callMode, onVoice, onDone, onChat }: {
   );
 }
 
-function CallerHistory({ h, onClose }: { h: { call: WaCall; rows: DispatchRow[]; calls?: PastCall[] }; onClose: () => void }) {
-  const past = (h.calls ?? []).filter((c) => c.id !== h.call.id);
-  return (
-    <div className="rounded-2xl border border-ink-700 bg-ink-900 p-4">
-      <div className="mb-2 flex items-center gap-2">
-        <h3 className="font-semibold">Historial de {h.call.name || h.call.phone}</h3>
-        <button className="ml-auto text-sm text-ink-400 hover:text-white" onClick={onClose}>Cerrar</button>
-      </div>
-      {h.rows.length === 0 ? <p className="text-sm text-ink-400">Cliente nuevo: no tiene reservas con este número.</p> : (
-        <ul className="divide-y divide-ink-800 text-sm">
-          {h.rows.map((r) => (
-            <li key={r.id} className="flex flex-wrap gap-3 py-1.5">
-              <span className="font-mono font-semibold">{r.reference}</span>
-              <span className="tabular-nums text-ink-300">{fmtDateTime(r.agreedPickupAt)}</span>
-              <span>{r.direction === "from_airport" ? `${r.airport} → ${r.zoneName ?? ""}` : `${r.zoneName ?? ""} → ${r.airport}`}</span>
-              <Badge tone={r.state}>{STATE[r.state] ?? r.state}</Badge>
-            </li>
-          ))}
-        </ul>
-      )}
-      {past.length > 0 && (
-        <div className="mt-3 border-t border-ink-800 pt-3" data-testid="past-calls">
-          <div className="mb-1 text-xs uppercase tracking-wide text-ink-400">Llamadas anteriores</div>
-          {past.map((c) => (
-            <details key={c.id} className="border-b border-ink-800 py-1.5 text-sm last:border-0">
-              <summary className="cursor-pointer">
-                <span className="tabular-nums text-ink-300">{fmtDateTime(c.startedAt)}</span>
-                {" · "}{c.handledBy === "bot" ? (c.transferred ? "Sofía → Central" : "Sofía") : "Central"}
-                {c.durationS ? ` · ${Math.max(1, Math.round(c.durationS / 60))} min` : ""}
-                {c.bookingRef && <span className="font-mono"> · {c.bookingRef}</span>}
-                {c.note && <span className="text-cab-300"> · {c.note}</span>}
-              </summary>
-              {c.transcript ? <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded-lg bg-ink-950 p-2 text-xs text-ink-300">{c.transcript}</pre>
-                : <p className="mt-1 text-xs text-ink-500">Sin transcripción.</p>}
-            </details>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}

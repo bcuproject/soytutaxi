@@ -13,6 +13,7 @@ import { ReportsPanel } from "../components/ReportsPanel";
 import { AccountsPanel } from "../components/AccountsPanel";
 import { WhatsAppSetup } from "../components/WhatsAppSetup";
 import { NewBookingsBell } from "../components/NewBookings";
+import { CallDesk, CallModeSwitch, useCallSettings } from "../components/CallDesk";
 import { useNavigate } from "react-router-dom";
 import { cx, fmtDateTime, fmtLocalDate, fmtTime, formatMoney } from "../lib/format";
 import { useConfig } from "./BookingPage";
@@ -105,6 +106,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
   const [error, setError] = useState<string | null>(null);
   const cfg = useConfig();
   const navigate = useNavigate();
+  const calls = useCallSettings();
   // A new booking from any channel: jump to its day and open it (bookings still at the booking desk open in the Central).
   const openNew = useCallback((r: DispatchRow) => {
     if (r.deskHold) { navigate("/central"); return; }
@@ -189,6 +191,8 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
             ))}
           </nav>
           <div className="ml-auto flex items-center gap-3 text-sm">
+            <CallModeSwitch compact settings={calls.settings} onChange={calls.change} />
+            {backend.simulateCall && <Button variant="outline" className="py-1.5 text-xs" onClick={() => backend.simulateCall!()} data-testid="simulate-call">📞 Simular</Button>}
             <NewBookingsBell onOpen={openNew} />
             <Radio compact disabled={backend.mode === "demo"} />
             <PaymentSettingsButton />
@@ -219,6 +223,8 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
       </header>
 
       <div className="px-5 py-5">
+        <div className="mb-4 empty:hidden"><CallDesk onOpenChat={() => setTab("whatsapp")} /></div>
+        {calls.err && <p role="alert" className="mb-4 rounded-xl bg-red-500/10 px-4 py-2 text-sm text-red-300">{calls.err}</p>}
         <div className={cx("mb-4 flex flex-wrap items-center gap-x-6 gap-y-2", ["whatsapp", "flights", "drivers", "accounts", "reports"].includes(tab) && "hidden")}>
           <h1 className="text-lg font-semibold first-letter:uppercase">{fmtLocalDate(date)}</h1>
           <Stat n={counts.total} label="viajes" />

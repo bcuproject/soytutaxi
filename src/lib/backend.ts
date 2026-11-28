@@ -49,7 +49,9 @@ export interface WaCall {
   /** Sofía asked for a person: a desk agent can take over the call live. */
   transferRequestedAt?: string | null; transferReason?: string | null; transferTakenAt?: string | null; transferTakenByMe?: boolean; transferFailedAt?: string | null;
 }
-export type CallMode = "desk" | "bot";
+/** desk = calls ring staff · smart = staff first, Sofía if everyone is busy or nobody answers in time · bot = Sofía takes every call. */
+export type CallMode = "desk" | "smart" | "bot";
+export interface CallSettings { mode: CallMode; voiceId: string | null; ringSeconds: number }
 
 export type FlightStatus = "scheduled" | "delayed" | "boarding" | "departed" | "en_route" | "approaching" | "landed" | "cancelled" | "diverted" | "unknown";
 export interface BoardFlight {
@@ -119,8 +121,8 @@ export interface Backend {
   waCalls(): Promise<WaCall[]>;
   callAction(callId: string, action: "accept" | "reject" | "terminate", sdp?: string): Promise<void>;
   linkCallBooking(callId: string, reference: string): Promise<void>;
-  callMode(): Promise<{ mode: CallMode; voiceId: string | null }>;
-  setCallMode(mode: CallMode, voiceId?: string | null): Promise<void>;
+  callMode(): Promise<CallSettings>;
+  setCallMode(mode: CallMode, voiceId?: string | null, ringSeconds?: number): Promise<void>;
   callbackDone(callId: string): Promise<void>;
   flightBoard(airport: "EZE" | "AEP", dir: "arr" | "dep"): Promise<FlightBoard>;
   decidePickup(bookingId: string, version: number, approve: boolean, releaseOnConflict?: boolean): Promise<{ releasedDriver?: boolean }>;
@@ -407,9 +409,11 @@ class DemoBackend implements Backend {
     this.notify("wa_calls");
   }
   async linkCallBooking(id: string, ref: string) { const c = this.calls.find((x) => x.id === id); if (c) c.bookingRef = ref; }
-  private callSettings: { mode: CallMode; voiceId: string | null } = { mode: "desk", voiceId: null };
+  private callSettings: CallSettings = { mode: "desk", voiceId: null, ringSeconds: 20 };
   async callMode() { return this.callSettings; }
-  async setCallMode(mode: CallMode, voiceId?: string | null) { this.callSettings = { mode, voiceId: voiceId ?? this.callSettings.voiceId }; }
+  async setCallMode(mode: CallMode, voiceId?: string | null, ringSeconds?: number) {
+    this.callSettings = { mode, voiceId: voiceId ?? this.callSettings.voiceId, ringSeconds: ringSeconds ?? this.callSettings.ringSeconds };
+  }
   async callbackDone(id: string) { const c = this.calls.find((x) => x.id === id); if (c) c.callbackDoneAt = new Date().toISOString(); this.notify("wa_calls"); }
   simulateCall() {
     if (this.callSettings.mode === "bot") {
@@ -830,10 +834,13 @@ class SupabaseBackend implements Backend {
   }
   async linkCallBooking(callId: string, reference: string) { await this.rpc("desk_call_link_booking", { p_call: callId, p_reference: reference }); }
   async callMode() {
-    const { data } = await this.sb.from("desk_settings").select("call_mode, fish_voice_id").maybeSingle();
-    return { mode: ((data?.call_mode as CallMode) ?? "desk"), voiceId: (data?.fish_voice_id as string) ?? null };
+    const { data } = await this.sb.from("desk_settings").select("call_mode, call_overflow, call_ring_seconds, fish_voice_id").maybeSingle();
+    const mode: CallMode = data?.call_mode === "bot" ? "bot" : data?.call_overflow ? "smart" : "desk";
+    return { mode, voiceId: (data?.fish_voice_id as string) ?? null, ringSeconds: (data?.call_ring_seconds as number) ?? 20 };
   }
-  async setCallMode(mode: CallMode, voiceId?: string | null) { await this.rpc("desk_set_call_mode", { p_mode: mode, p_voice_id: voiceId || null }); }
+  async setCallMode(mode: CallMode, voiceId?: string | null, ringSeconds?: number) {
+    await this.rpc("desk_set_call_routing", { p_mode: mode, p_voice_id: voiceId || null, p_ring_seconds: ringSeconds ?? null });
+  }
   async callbackDone(callId: string) { await this.rpc("desk_callback_done", { p_call: callId }); }
   private async flightsGet<T>(path: string): Promise<T> {
     const { data } = await this.sb.auth.getSession();

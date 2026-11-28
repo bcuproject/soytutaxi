@@ -3259,8 +3259,13 @@ async function processWebhook(parsed, deps2) {
     for (const c of parsed.calls) {
       try {
         if (c.event === "connect" && c.from && c.sdp) {
-          if (!await routeToBot(deps2, cfg2.operatorId, c.id, c.from, c.profileName ?? null, c.sdp, log2)) {
-            await deps2.db.callIncoming(cfg2.operatorId, c.id, c.from, c.profileName ?? null, c.sdp);
+          const route = await deps2.db.callRoute(cfg2.operatorId);
+          if (route.mode === "bot" && await routeToBot(deps2, cfg2.operatorId, c.id, c.from, c.profileName ?? null, c.sdp, log2, route)) continue;
+          await deps2.db.callIncoming(cfg2.operatorId, c.id, c.from, c.profileName ?? null, c.sdp);
+          if (route.mode === "desk" && route.overflow && deps2.voiceBot && deps2.db.callOverflowClaim) {
+            const busy = deps2.db.deskBusy ? await deps2.db.deskBusy(cfg2.operatorId).catch(() => false) : false;
+            if (!busy) await (deps2.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))))((route.ringSeconds ?? 20) * 1e3);
+            await overflowToBot(deps2, c.id, route, busy ? "busy" : "no_answer", log2);
           }
         } else if (c.event === "terminate") {
           const known = deps2.voiceBot ? await deps2.db.callByProvider(c.id) : null;
@@ -3416,9 +3421,33 @@ async function callAction(deps2, userId, isStaffOf, input) {
   await deps2.db.callSet(id, "ended", r.ok ? null : r.error);
   return { status: 200, body: { status: "ended" } };
 }
-async function routeToBot(deps2, operatorId, callId, waId, name, sdp, log2) {
+async function overflowToBot(deps2, callId, route, why, log2) {
+  if (!deps2.voiceBot || !deps2.voiceSecret || !deps2.voiceToolUrl || !deps2.db.callOverflowClaim) return false;
+  const room = `stt-call-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+  const claim = await deps2.db.callOverflowClaim(callId, room);
+  if (!claim) return false;
+  const phone = `+${claim.waId.replace(/\D/g, "")}`;
+  try {
+    await deps2.voiceBot.accept({ callId, sdp: claim.sdp, room, callerPhone: phone, attributes: {
+      bcu_assistant: VOICE_ASSISTANT,
+      caller_phone: phone,
+      caller_name: claim.name ?? "",
+      wa_call_id: callId,
+      stt_token: await voiceToken(deps2.voiceSecret, callId),
+      stt_api: deps2.voiceToolUrl,
+      stt_voice: route.voiceId ?? ""
+    } });
+    log2({ level: "info", where: "wa-voice-overflow", call: callId, why });
+    return true;
+  } catch (e) {
+    log2({ level: "error", where: "wa-voice-overflow", call: callId, error: String(e?.message ?? e).slice(0, 300) });
+    await deps2.db.callOverflowRelease?.(callId).catch(() => {
+    });
+    return false;
+  }
+}
+async function routeToBot(deps2, operatorId, callId, waId, name, sdp, log2, route) {
   if (!deps2.voiceBot || !deps2.voiceSecret || !deps2.voiceToolUrl) return false;
-  const route = await deps2.db.callRoute(operatorId);
   if (route.mode !== "bot") return false;
   const room = `stt-call-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
   const phone = `+${waId.replace(/\D/g, "")}`;
@@ -3538,6 +3567,10 @@ var waDb = {
     await rpc("wa_call_set", { p_call: id, p_status: status, p_error: error });
   },
   callRoute: (op) => rpc("wa_call_route", { p_operator: op }),
+  deskBusy: (op) => rpc("wa_desk_busy", { p_operator: op }),
+  callOverflowClaim: (id, room) => rpc("wa_call_overflow_claim", { p_call_id: id, p_room: room }),
+  callOverflowRelease: (id) => rpc("wa_call_overflow_release", { p_call_id: id }).then(() => {
+  }),
   callBotStarted: (op, id, wa, name, room) => rpc("wa_call_bot_started", { p_operator: op, p_call_id: id, p_wa_id: wa, p_name: name, p_room: room }),
   async callByProvider(id) {
     const { data, error } = await db.from("wa_calls").select("*").eq("provider_call_id", id).maybeSingle();

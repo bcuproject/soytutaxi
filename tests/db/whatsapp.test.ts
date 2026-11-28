@@ -55,6 +55,9 @@ const waDb: WaDb = {
   callClaim: async (id, user) => { const r = (await q("select (c).* from (select public.wa_call_claim(p_call => $1, p_user => $2) as c) t", [id, user]))[0]; return r?.id ? r : null; },
   callSet: async (id, status, error = null) => { await rpc("wa_call_set", { p_call: id, p_status: status, p_error: error }); },
   callRoute: (op) => rpc("wa_call_route", { p_operator: op }),
+  deskBusy: (op) => rpc("wa_desk_busy", { p_operator: op }),
+  callOverflowClaim: (id, room) => rpc("wa_call_overflow_claim", { p_call_id: id, p_room: room }),
+  callOverflowRelease: async (id) => { await rpc("wa_call_overflow_release", { p_call_id: id }); },
   callBotStarted: (op, id, wa, name, room) => rpc("wa_call_bot_started", { p_operator: op, p_call_id: id, p_wa_id: wa, p_name: name, p_room: room }),
   callByProvider: async (id) => {
     const r = (await q("select * from wa_calls where provider_call_id = $1", [id]))[0];
@@ -328,6 +331,39 @@ describe("Voice bot (database)", () => {
 
     await processWebhook(callHook([{ id: "wacid.V2", from: "5491100009999", event: "connect", session: { sdp_type: "offer", sdp: "v=0 c" } }]), vdeps());
     expect((await q("select status, handled_by from wa_calls where provider_call_id = 'wacid.V2'"))[0]).toEqual({ status: "ringing", handled_by: "desk" });
+  });
+
+  it("Central first, Sofía back-up: no answer in time → Sofía; someone answered → stays with the Central; Central busy → Sofía at once", async () => {
+    await q("insert into desk_settings (operator_id, call_mode, call_overflow, call_ring_seconds) values ($1, 'desk', true, 8) on conflict (operator_id) do update set call_mode = 'desk', call_overflow = true, call_ring_seconds = 8", [DEMO_OPERATOR_ID]);
+    const before = accepted.length;
+    const waits: number[] = [];
+    // Nobody answers: after the ring time the bot takes it.
+    await processWebhook(callHook([{ id: "wacid.O1", from: "5491100006661", event: "connect", session: { sdp_type: "offer", sdp: "v=0 o1" } }]),
+      { ...vdeps(), sleep: async (ms: number) => { waits.push(ms); } });
+    expect(waits).toEqual([8000]);
+    expect(accepted.length).toBe(before + 1);
+    expect(accepted.at(-1)).toMatchObject({ callId: "wacid.O1", sdp: "v=0 o1", callerPhone: "+5491100006661" });
+    expect((await q("select status, handled_by from wa_calls where provider_call_id = 'wacid.O1'"))[0]).toEqual({ status: "active", handled_by: "bot" });
+
+    // Someone answers while it rings: the bot leaves it alone.
+    await processWebhook(callHook([{ id: "wacid.O2", from: "5491100006662", event: "connect", session: { sdp_type: "offer", sdp: "v=0 o2" } }]),
+      { ...vdeps(), sleep: async () => { await q("update wa_calls set status = 'active', answered_by = gen_random_uuid(), connected_at = now() where provider_call_id = 'wacid.O2'"); } });
+    expect(accepted.length).toBe(before + 1);
+    expect((await q("select status, handled_by from wa_calls where provider_call_id = 'wacid.O2'"))[0]).toEqual({ status: "active", handled_by: "desk" });
+
+    // The Central is on that call → the next caller goes straight to the bot, no waiting.
+    const waits3: number[] = [];
+    await processWebhook(callHook([{ id: "wacid.O3", from: "5491100006663", event: "connect", session: { sdp_type: "offer", sdp: "v=0 o3" } }]),
+      { ...vdeps(), sleep: async (ms: number) => { waits3.push(ms); } });
+    expect(waits3).toEqual([]);
+    expect(accepted.at(-1)).toMatchObject({ callId: "wacid.O3" });
+
+    // LiveKit down during overflow → rings the Central again.
+    await q("update wa_calls set status = 'ended', ended_at = now() where provider_call_id = 'wacid.O2'");
+    await processWebhook(callHook([{ id: "wacid.O4", from: "5491100009999", event: "connect", session: { sdp_type: "offer", sdp: "v=0 o4" } }]),
+      { ...vdeps(), sleep: async () => {} });
+    expect((await q("select status, handled_by from wa_calls where provider_call_id = 'wacid.O4'"))[0]).toEqual({ status: "ringing", handled_by: "desk" });
+    await q("update desk_settings set call_overflow = false where operator_id = $1", [DEMO_OPERATOR_ID]);
   });
 
   it("tools: config, quote, book (WhatsApp sent, phone from the call), bookings, callback note", async () => {

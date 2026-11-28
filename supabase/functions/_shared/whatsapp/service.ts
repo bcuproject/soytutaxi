@@ -44,7 +44,12 @@ export interface WaDb {
   callGet(id: string): Promise<CallRow | null>;
   callClaim(id: string, userId: string): Promise<CallRow | null>;
   callSet(id: string, status: CallRow["status"], error?: string | null): Promise<void>;
-  callRoute(operatorId: string): Promise<{ mode: "desk" | "bot"; voiceId: string | null }>;
+  callRoute(operatorId: string): Promise<CallRoute>;
+  /** Someone at the Central is already on a call. */
+  deskBusy?(operatorId: string): Promise<boolean>;
+  /** Move a still-ringing desk call to the bot; null when someone answered (or it ended) meanwhile. */
+  callOverflowClaim?(callId: string, room: string): Promise<{ waId: string; name: string | null; sdp: string } | null>;
+  callOverflowRelease?(callId: string): Promise<void>;
   callBotStarted(operatorId: string, callId: string, waId: string, name: string | null, room: string): Promise<string | null>;
   callByProvider(providerCallId: string): Promise<VoiceCall | null>;
   callNote(providerCallId: string, note: string, callback: boolean): Promise<void>;
@@ -56,6 +61,8 @@ export interface WaDb {
   /** Find (or create, without opening the 24 h window) the conversation for an outbound notification. */
   openConversationForNotify(operatorId: string, waId: string): Promise<string | null>;
 }
+
+export interface CallRoute { mode: "desk" | "bot"; voiceId: string | null; overflow?: boolean; ringSeconds?: number }
 
 export interface ServiceDeps {
   db: WaDb;
@@ -76,6 +83,8 @@ export interface ServiceDeps {
   publicAppUrl: string;
   templates?: TemplateMap;
   log?: (o: Record<string, unknown>) => void;
+  /** Injectable wait (tests). */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 const kindOf = (m: Outbound) => (m.type === "buttons" || m.type === "list" || m.type === "flow" ? "interactive" : m.type);
@@ -96,8 +105,14 @@ export async function processWebhook(parsed: ParsedWebhook, deps: ServiceDeps): 
     for (const c of parsed.calls) {
       try {
         if (c.event === "connect" && c.from && c.sdp) {
-          if (!(await routeToBot(deps, cfg.operatorId, c.id, c.from, c.profileName ?? null, c.sdp, log))) {
-            await deps.db.callIncoming(cfg.operatorId, c.id, c.from, c.profileName ?? null, c.sdp);
+          const route = await deps.db.callRoute(cfg.operatorId);
+          if (route.mode === "bot" && await routeToBot(deps, cfg.operatorId, c.id, c.from, c.profileName ?? null, c.sdp, log, route)) continue;
+          await deps.db.callIncoming(cfg.operatorId, c.id, c.from, c.profileName ?? null, c.sdp);
+          // "Central first, Sofía back-up": the bot takes it if the Central is busy, or after N seconds of ringing.
+          if (route.mode === "desk" && route.overflow && deps.voiceBot && deps.db.callOverflowClaim) {
+            const busy = deps.db.deskBusy ? await deps.db.deskBusy(cfg.operatorId).catch(() => false) : false;
+            if (!busy) await (deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))))((route.ringSeconds ?? 20) * 1000);
+            await overflowToBot(deps, c.id, route, busy ? "busy" : "no_answer", log);
           }
         } else if (c.event === "terminate") {
           const known = deps.voiceBot ? await deps.db.callByProvider(c.id) : null;
@@ -249,11 +264,32 @@ export async function callAction(
   return { status: 200, body: { status: "ended" } };
 }
 
+/** Hand a desk call that is still ringing to the voice bot (Central busy or nobody answered). */
+async function overflowToBot(deps: ServiceDeps, callId: string, route: CallRoute, why: string,
+  log: (o: Record<string, unknown>) => void): Promise<boolean> {
+  if (!deps.voiceBot || !deps.voiceSecret || !deps.voiceToolUrl || !deps.db.callOverflowClaim) return false;
+  const room = `stt-call-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+  const claim = await deps.db.callOverflowClaim(callId, room);
+  if (!claim) return false;                                  // answered, rejected or ended meanwhile
+  const phone = `+${claim.waId.replace(/\D/g, "")}`;
+  try {
+    await deps.voiceBot.accept({ callId, sdp: claim.sdp, room, callerPhone: phone, attributes: {
+      bcu_assistant: VOICE_ASSISTANT, caller_phone: phone, caller_name: claim.name ?? "", wa_call_id: callId,
+      stt_token: await voiceToken(deps.voiceSecret, callId), stt_api: deps.voiceToolUrl, stt_voice: route.voiceId ?? "",
+    } });
+    log({ level: "info", where: "wa-voice-overflow", call: callId, why });
+    return true;
+  } catch (e) {
+    log({ level: "error", where: "wa-voice-overflow", call: callId, error: String((e as Error)?.message ?? e).slice(0, 300) });
+    await deps.db.callOverflowRelease?.(callId).catch(() => {});
+    return false;
+  }
+}
+
 /** Voice bot answers when the Central chose "Bot" and LiveKit is configured; any failure rings the Central instead. */
 async function routeToBot(deps: ServiceDeps, operatorId: string, callId: string, waId: string, name: string | null, sdp: string,
-  log: (o: Record<string, unknown>) => void): Promise<boolean> {
+  log: (o: Record<string, unknown>) => void, route: CallRoute): Promise<boolean> {
   if (!deps.voiceBot || !deps.voiceSecret || !deps.voiceToolUrl) return false;
-  const route = await deps.db.callRoute(operatorId);
   if (route.mode !== "bot") return false;
   const room = `stt-call-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
   const phone = `+${waId.replace(/\D/g, "")}`;

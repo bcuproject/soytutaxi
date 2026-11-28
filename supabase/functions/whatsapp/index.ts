@@ -121,6 +121,9 @@ const waDb: WaDb = {
   },
   callSet: async (id, status, error = null) => { await rpc("wa_call_set", { p_call: id, p_status: status, p_error: error }); },
   callRoute: (op) => rpc("wa_call_route", { p_operator: op }),
+  deskBusy: (op) => rpc<boolean>("wa_desk_busy", { p_operator: op }),
+  callOverflowClaim: (id, room) => rpc("wa_call_overflow_claim", { p_call_id: id, p_room: room }),
+  callOverflowRelease: (id) => rpc<void>("wa_call_overflow_release", { p_call_id: id }).then(() => {}),
   callBotStarted: (op, id, wa, name, room) => rpc<string | null>("wa_call_bot_started", { p_operator: op, p_call_id: id, p_wa_id: wa, p_name: name, p_room: room }),
   async callByProvider(id) {
     const { data, error } = await db.from("wa_calls").select("*").eq("provider_call_id", id).maybeSingle();
