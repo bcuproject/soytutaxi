@@ -36,6 +36,32 @@ def selected(attributes) -> bool:
             and len(str(a.get("stt_token", ""))) >= 20 and bool(a.get("wa_call_id")))
 
 
+# Callers speak Spanish or English (sometimes both): the transcription prompt must not lean either way.
+STT_PROMPT = ("Phone call to an airport transfer company in Buenos Aires. The caller speaks Spanish (Argentina) or English, "
+              "sometimes mixing both. Write exactly what is said, in the language it is said. Terms: ")
+# Wait a bit longer than the default 0.5 s before deciding the caller finished, so the words arrive first.
+MIN_ENDPOINTING_S = float(os.environ.get("SOYTUTAXI_MIN_ENDPOINTING", "0.8"))
+MAX_ENDPOINTING_S = float(os.environ.get("SOYTUTAXI_MAX_ENDPOINTING", "5.0"))
+
+
+def make_stt(openai):
+    """Live (streaming) transcription when this LiveKit version offers it, else the batch transcriber."""
+    base = dict(model=STT_MODEL, language="es", detect_language=True, prompt=STT_PROMPT + ", ".join(KEYTERMS))
+    try:
+        return openai.STT(**base, use_realtime=True)
+    except TypeError:
+        return openai.STT(**base)
+
+
+def make_session(AgentSession, silero, openai, fishaudio, tts_args):
+    parts = dict(vad=silero.VAD.load(), stt=make_stt(openai), llm=openai.LLM(model=LLM_MODEL, temperature=0.3),
+                 tts=fishaudio.TTS(**tts_args))
+    try:
+        return AgentSession(**parts, min_endpointing_delay=MIN_ENDPOINTING_S, max_endpointing_delay=MAX_ENDPOINTING_S)
+    except TypeError:
+        return AgentSession(**parts)
+
+
 def greeting(facts) -> str:
     name = (facts.get("callerName") or "").split(" ")[0]
     again = bool((facts.get("customer") or {}).get("previousCalls") or (facts.get("customer") or {}).get("recentWhatsApp"))
@@ -287,13 +313,7 @@ async def run_call(ctx, caller):
                         sample_rate=24000, latency_mode="balanced", http_session=http)
         if voice:
             tts_args["voice_id"] = voice
-        session = AgentSession(
-            vad=silero.VAD.load(),
-            stt=openai.STT(model=STT_MODEL, language="es", detect_language=True,
-                           prompt="Llamada a una empresa de traslados al aeropuerto en Buenos Aires. " + ", ".join(KEYTERMS)),
-            llm=openai.LLM(model=LLM_MODEL, temperature=0.3),
-            tts=fishaudio.TTS(**tts_args),
-        )
+        session = make_session(AgentSession, silero, openai, fishaudio, tts_args)
         room = ctx.room
 
         def joined(p):
