@@ -6,6 +6,8 @@ import { Badge, Button, Logo } from "../components/ui";
 import { CallPanel, useCalls } from "../components/CallPanel";
 import { TransferCalls } from "../components/TransferCalls";
 import { WhatsAppInbox } from "../components/WhatsAppInbox";
+import { NewBookingsBell } from "../components/NewBookings";
+import { useNavigate } from "react-router-dom";
 import { backend, CommandError, type CallMode, type DeskMethod, type DeskMode, type DispatchRow, type PastCall, type StaffSession, type WaCall } from "../lib/backend";
 import { cx, fmtDateTime, fmtTime, formatMoney } from "../lib/format";
 import { LocaleContext, makeT } from "../lib/i18n";
@@ -105,6 +107,11 @@ function Central({ session, onSignOut }: { session: StaffSession; onSignOut: () 
     } catch (e) { setErr(e instanceof CommandError ? ERR[e.code] ?? e.message : (e as Error).message); }
     finally { setBusy(null); load(); }
   }
+  const navigate = useNavigate();
+  // Bell: bookings waiting here open the desk queue; the rest open in Despacho on their day.
+  const openNew = useCallback((r: DispatchRow) => {
+    if (r.deskHold) setTab("incoming"); else navigate(`/despacho?ref=${encodeURIComponent(r.reference)}`);
+  }, [navigate]);
   const startBooking = (c?: WaCall) => {
     setNewFor({ key: crypto.randomUUID(), name: c?.name ?? undefined, phone: c?.phone, callId: c?.id });
     setTab("new");
@@ -148,6 +155,7 @@ function Central({ session, onSignOut }: { session: StaffSession; onSignOut: () 
               </div>
             </div>
             {backend.simulateCall && <Button variant="outline" className="py-1.5 text-xs" onClick={() => backend.simulateCall!()} data-testid="simulate-call">📞 Simular llamada</Button>}
+            <NewBookingsBell onOpen={openNew} />
             <Link to="/despacho" className="text-ink-300 hover:text-white">Despacho →</Link>
             <span className="hidden text-ink-400 md:inline">{session.label}</span>
             <Button variant="ghost" className="px-2 py-2" onClick={onSignOut}>Salir</Button>

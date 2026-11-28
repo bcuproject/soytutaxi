@@ -243,8 +243,17 @@ await page.type('[data-testid="flight-exception"]', "Vuelo privado");
 await page.click('[data-testid="submit-booking"]');
 await page.waitForSelector('[data-testid="booking-ref"]');
 assert(true, "staff booking with exception reason created");
+const staffRef = await page.$eval('[data-testid="booking-ref"]', (e) => e.innerText.trim());
 await clickText("button", "Volver a despacho");
 await page.waitForSelector('[data-testid="schedule"]');
+// New-booking alert: the booking just made pops up in Despacho with its channel, and opens on its day.
+await page.waitForSelector(`[data-testid="new-booking-${staffRef}"]`, { timeout: 8000 });
+assert(await page.$eval(`[data-testid="new-booking-${staffRef}"]`, (e) => /nueva reserva/i.test(e.innerText) && e.innerText.includes("Central")), "new booking alert shows in Despacho");
+await page.screenshot({ path: `${SHOTS}/7c-new-booking.png` });
+await clickText(`[data-testid="new-booking-${staffRef}"] button`, "Ver reserva");
+await page.waitForFunction((r) => document.querySelector('[role="dialog"]')?.innerText.includes(r), {}, staffRef);
+assert(true, "Ver reserva opens the new booking on its day");
+await page.keyboard.press("Escape");
 
 // Mobile form
 await page.setViewport({ width: 390, height: 844 });   // isMobile would reload the page and drop demo state

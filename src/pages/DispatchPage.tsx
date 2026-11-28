@@ -12,6 +12,8 @@ import { DriversAdmin } from "../components/DriversAdmin";
 import { ReportsPanel } from "../components/ReportsPanel";
 import { AccountsPanel } from "../components/AccountsPanel";
 import { WhatsAppSetup } from "../components/WhatsAppSetup";
+import { NewBookingsBell } from "../components/NewBookings";
+import { useNavigate } from "react-router-dom";
 import { cx, fmtDateTime, fmtLocalDate, fmtTime, formatMoney } from "../lib/format";
 import { useConfig } from "./BookingPage";
 
@@ -102,6 +104,20 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
   const [loadedAt, setLoadedAt] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
   const cfg = useConfig();
+  const navigate = useNavigate();
+  // A new booking from any channel: jump to its day and open it (bookings still at the booking desk open in the Central).
+  const openNew = useCallback((r: DispatchRow) => {
+    if (r.deskHold) { navigate("/central"); return; }
+    setDate(r.pickupLocalDate || utcToLocalDate(new Date(r.agreedPickupAt)));
+    setTab((t) => (t === "schedule" || t === "bookings" || t === "map" ? t : "schedule"));
+    setSelected(r);
+  }, [navigate]);
+  // Opened from the Central's bell with ?ref=STT-…: show that booking.
+  useEffect(() => {
+    const ref = new URLSearchParams(window.location.search).get("ref");
+    if (!ref) return;
+    backend.deskRows().then((list) => { const r = list.find((x) => x.reference === ref); if (r) openNew(r); else { setQ(ref); setTab("bookings"); } }).catch(() => {});
+  }, [openNew]);
   const turnaround = cfg?.policy.turnaroundMinutes ?? 20;
 
   const load = useCallback(async () => {
@@ -173,6 +189,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
             ))}
           </nav>
           <div className="ml-auto flex items-center gap-3 text-sm">
+            <NewBookingsBell onOpen={openNew} />
             <Radio compact disabled={backend.mode === "demo"} />
             <PaymentSettingsButton />
             <Link to="/central" className="text-ink-300 hover:text-white">Central →</Link>
