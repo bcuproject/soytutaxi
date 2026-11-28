@@ -1395,10 +1395,10 @@ var TEMPLATES = [
     example: ["STT-AB12CD", "s\xE1bado 28/11, 10:30"]
   }
 ];
-var DATETIME_FLOW_NAME = "stt_datetime_v1";
+var DATETIME_FLOW_NAME = "stt_datetime_v2";
 var two = (n) => String(n).padStart(2, "0");
 var DATETIME_FLOW_JSON = {
-  version: "7.0",
+  version: "7.1",
   screens: [{
     id: "WHEN",
     title: "SoyTuTaxi",
@@ -1416,7 +1416,7 @@ var DATETIME_FLOW_JSON = {
       type: "SingleColumnLayout",
       children: [
         { type: "TextBody", text: "${data.intro}" },
-        { type: "DatePicker", name: "date", label: "${data.date_label}", "min-date": "${data.min_date}", "max-date": "${data.max_date}", required: true },
+        { type: "CalendarPicker", name: "date", mode: "single", label: "${data.date_label}", "min-date": "${data.min_date}", "max-date": "${data.max_date}", required: true },
         {
           type: "Dropdown",
           name: "hour",

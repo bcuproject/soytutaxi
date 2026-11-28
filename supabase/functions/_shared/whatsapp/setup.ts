@@ -73,10 +73,10 @@ export const TEMPLATES: { kind: string; name: string; category: "UTILITY"; body:
 ];
 
 /** WhatsApp Flow: calendar + hour/minute dropdowns. No data endpoint: the bot passes the dates and labels when sending. */
-export const DATETIME_FLOW_NAME = "stt_datetime_v1";
+export const DATETIME_FLOW_NAME = "stt_datetime_v2";
 const two = (n: number) => String(n).padStart(2, "0");
 export const DATETIME_FLOW_JSON = {
-  version: "7.0",
+  version: "7.1",
   screens: [{
     id: "WHEN", title: "SoyTuTaxi", terminal: true, success: true,
     data: {
@@ -91,7 +91,7 @@ export const DATETIME_FLOW_JSON = {
       type: "SingleColumnLayout",
       children: [
         { type: "TextBody", text: "${data.intro}" },
-        { type: "DatePicker", name: "date", label: "${data.date_label}", "min-date": "${data.min_date}", "max-date": "${data.max_date}", required: true },
+        { type: "CalendarPicker", name: "date", mode: "single", label: "${data.date_label}", "min-date": "${data.min_date}", "max-date": "${data.max_date}", required: true },
         { type: "Dropdown", name: "hour", label: "${data.hour_label}", required: true,
           "data-source": Array.from({ length: 24 }, (_, h) => ({ id: two(h), title: `${two(h)} h` })) },
         { type: "Dropdown", name: "minute", label: "${data.minute_label}", required: true,
