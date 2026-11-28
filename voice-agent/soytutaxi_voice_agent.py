@@ -39,8 +39,8 @@ def selected(attributes) -> bool:
 # Callers speak Spanish or English (sometimes both): the transcription prompt must not lean either way.
 STT_PROMPT = ("Phone call to an airport transfer company in Buenos Aires. The caller speaks Spanish (Argentina) or English, "
               "sometimes mixing both. Write exactly what is said, in the language it is said. Terms: ")
-# Wait a bit longer than the default 0.5 s before deciding the caller finished, so the words arrive first.
-MIN_ENDPOINTING_S = float(os.environ.get("SOYTUTAXI_MIN_ENDPOINTING", "0.8"))
+# Silence (s) before the caller's turn counts as finished. Live transcription keeps up, so the default 0.5 s is fine.
+MIN_ENDPOINTING_S = float(os.environ.get("SOYTUTAXI_MIN_ENDPOINTING", "0.5"))
 MAX_ENDPOINTING_S = float(os.environ.get("SOYTUTAXI_MAX_ENDPOINTING", "5.0"))
 
 
@@ -56,18 +56,43 @@ def make_stt(openai):
 def make_session(AgentSession, silero, openai, fishaudio, tts_args):
     parts = dict(vad=silero.VAD.load(), stt=make_stt(openai), llm=openai.LLM(model=LLM_MODEL, temperature=0.3),
                  tts=fishaudio.TTS(**tts_args))
+    # preemptive_generation: start thinking on the live transcript while the caller finishes the sentence.
+    for extra in (dict(min_endpointing_delay=MIN_ENDPOINTING_S, max_endpointing_delay=MAX_ENDPOINTING_S, preemptive_generation=True),
+                  dict(min_endpointing_delay=MIN_ENDPOINTING_S, max_endpointing_delay=MAX_ENDPOINTING_S), {}):
+        try:
+            return AgentSession(**parts, **extra)
+        except TypeError:
+            continue
+
+
+def log_turn_metrics(session):
+    """One log line per step (eou / llm / tts) with the delays that make up Sofía's response time."""
+    def on(ev):
+        m = getattr(ev, "metrics", None)
+        kind = type(m).__name__
+        try:
+            if kind == "EOUMetrics":
+                log.info("timing eou=%.2fs transcript=%.2fs", m.end_of_utterance_delay, m.transcription_delay)
+            elif kind == "LLMMetrics":
+                log.info("timing llm_first_token=%.2fs llm_total=%.2fs", m.ttft, m.duration)
+            elif kind == "TTSMetrics":
+                log.info("timing tts_first_audio=%.2fs", m.ttfb)
+        except Exception:  # noqa: BLE001 - metrics are best effort
+            pass
     try:
-        return AgentSession(**parts, min_endpointing_delay=MIN_ENDPOINTING_S, max_endpointing_delay=MAX_ENDPOINTING_S)
-    except TypeError:
-        return AgentSession(**parts)
+        session.on("metrics_collected", on)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def greeting(facts) -> str:
     name = (facts.get("callerName") or "").split(" ")[0]
     again = bool((facts.get("customer") or {}).get("previousCalls") or (facts.get("customer") or {}).get("recentWhatsApp"))
     hola = f"¡Hola{' de nuevo' if again else ''}{(', ' + name) if name and again else (' ' + name) if name else ''}!"
-    return (f"{hola} Gracias por llamar a SoyTuTaxi, traslados con tarifa fija desde y hacia Ezeiza y Aeroparque. "
-            "Soy Sofía, la asistente virtual. ¿En qué te puedo ayudar? You can also speak English.")
+    # Short on purpose: every second of greeting is a second the caller waits. Returning callers skip the intro.
+    if again:
+        return f"{hola} Soy Sofía, de SoyTuTaxi. ¿En qué te ayudo? You can also speak English."
+    return f"{hola} SoyTuTaxi, traslados al aeropuerto. Soy Sofía, ¿en qué te ayudo? You can also speak English."
 
 
 def build_prompt(facts) -> str:
@@ -314,6 +339,7 @@ async def run_call(ctx, caller):
         if voice:
             tts_args["voice_id"] = voice
         session = make_session(AgentSession, silero, openai, fishaudio, tts_args)
+        log_turn_metrics(session)
         room = ctx.room
 
         def joined(p):
