@@ -16,6 +16,9 @@ export interface SetupEnv {
   verifyToken: string;      // WHATSAPP_VERIFY_TOKEN
   wabaId?: string | null;
   phoneNumberId?: string | null;
+  /** Only used to READ the app's webhook subscriptions (app access token = app id | app secret). */
+  appSecret?: string | null;
+  fetchImpl?: typeof fetch;
 }
 
 type Graph = (method: "GET" | "POST", path: string, body?: unknown) => Promise<{ ok: boolean; status: number; data: any }>;
@@ -96,7 +99,20 @@ export async function runSetup(action: SetupAction, args: Record<string, unknown
         const s = await g("GET", `${phone}/settings`);
         calling = s.ok ? s.data?.calling ?? null : metaError(s.data);
       }
+      // Which webhook fields the Meta app is subscribed to (read-only). A per-number override only receives
+      // the fields the app subscribes to, so "calls" must be there for WhatsApp calls to arrive.
+      let appWebhook: { fields: string[]; defaultCallback: string | null } | null = null;
+      const appId = dbg.data?.data?.app_id;
+      if (appId && env.appSecret) {
+        try {
+          const r = await (env.fetchImpl ?? fetch)(`https://graph.facebook.com/${GRAPH_VERSION}/${appId}/subscriptions?access_token=${encodeURIComponent(`${appId}|${env.appSecret}`)}`);
+          const j = await r.json().catch(() => ({}));
+          const sub = (j?.data ?? []).find((x: any) => x.object === "whatsapp_business_account");
+          appWebhook = { fields: (sub?.fields ?? []).map((f: any) => f.name ?? f), defaultCallback: sub?.callback_url ?? null };
+        } catch { appWebhook = null; }
+      }
       return { ok: true, status: 200, body: {
+        appWebhook,
         tokenValid: !!dbg.data?.data?.is_valid, appId: dbg.data?.data?.app_id ?? null, expiresAt: dbg.data?.data?.expires_at ?? null,
         permissions, accounts, selected: { wabaId: waba || null, phoneNumberId: phone || null }, calling,
         callbackUrl: env.callbackUrl,

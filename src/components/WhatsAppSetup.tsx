@@ -63,6 +63,13 @@ export function WhatsAppSetup() {
         <span className="flex items-center gap-2"><Dot ok={st && current ? calling : null} /> Llamadas de WhatsApp activadas</span>
         <span className="flex items-center gap-2"><Dot ok={st ? (st.connected?.templates ?? 0) > 0 : null} /> Plantillas ({st?.connected?.templates ?? 0})</span>
       </div>
+      {st?.appWebhook && (
+        <p className={cx("mt-2 text-xs", st.appWebhook.fields.includes("calls") && st.appWebhook.fields.includes("messages") ? "text-ink-400" : "text-amber-300")} data-testid="app-fields">
+          Campos suscritos en la app de Meta: {st.appWebhook.fields.join(", ") || "ninguno"}.
+          {!st.appWebhook.fields.includes("calls") && " Falta \"calls\": sin eso las llamadas de WhatsApp no llegan a ningún sistema. Pedí a quien administra la app que lo agregue SIN cambiar la Callback URL de la app."}
+          {!st.appWebhook.fields.includes("messages") && " Falta \"messages\"."}
+        </p>
+      )}
       {st && !sec.appSecret && <p className="mt-2 text-xs text-amber-300">Sin el App secret, SoyTuTaxi rechaza todos los mensajes entrantes (no puede comprobar que vienen de Meta). Pedíselo a quien administra la app de Meta y cargalo en Supabase como WHATSAPP_APP_SECRET.</p>}
 
       {(st?.accounts?.length ?? 0) > 0 && (

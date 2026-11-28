@@ -88,3 +88,20 @@ describe("WhatsApp setup", () => {
     expect((await runSetup("status", {}, { ...env, token: "" }, g)).body).toEqual({ error: { code: "token_missing" } });
   });
 });
+
+describe("WhatsApp setup — app webhook fields (read-only)", () => {
+  it("reports the app's subscribed fields using the app secret, without changing anything", async () => {
+    const { g } = fakeGraph({ "GET debug_token": { data: { is_valid: true, app_id: "999", granular_scopes: [] } } });
+    const seen: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      seen.push(url);
+      return new Response(JSON.stringify({ data: [{ object: "whatsapp_business_account", callback_url: "https://other.example/hook",
+        fields: [{ name: "messages" }, { name: "message_template_status_update" }] }] }));
+    }) as unknown as typeof fetch;
+    const r = await runSetup("status", {}, { ...env, appSecret: "app-secret-xyz", fetchImpl }, g);
+    expect(r.body.appWebhook).toEqual({ fields: ["messages", "message_template_status_update"], defaultCallback: "https://other.example/hook" });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatch(/\/999\/subscriptions\?access_token=/);        // a GET: nothing is modified
+    expect(JSON.stringify(r.body)).not.toContain("app-secret-xyz");
+  });
+});

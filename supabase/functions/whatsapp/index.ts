@@ -280,7 +280,7 @@ Deno.serve(async (req) => {
     }
     const r = await runSetup(action, body?.args ?? {}, {
       token: sec("WHATSAPP_ACCESS_TOKEN"), callbackUrl: `${SUPABASE_URL.replace(/\/$/, "")}/functions/v1/whatsapp`,
-      verifyToken: sec("WHATSAPP_VERIFY_TOKEN"), wabaId: RT.wabaId, phoneNumberId: RT.phoneId,
+      verifyToken: sec("WHATSAPP_VERIFY_TOKEN"), wabaId: RT.wabaId, phoneNumberId: RT.phoneId, appSecret: sec("WHATSAPP_APP_SECRET"),
     }, graph(sec("WHATSAPP_ACCESS_TOKEN")));
     if (r.save) {
       await rpc("wa_runtime_set", { p_phone: r.save.phoneNumberId ?? null, p_waba: r.save.wabaId ?? null,
