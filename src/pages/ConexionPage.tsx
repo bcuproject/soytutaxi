@@ -95,6 +95,7 @@ function Keys() {
       catch (x) { setMsg({ ok: false, text: errText(x) }); } finally { setBusy(false); }
     }}>
       <h2 className="font-semibold text-white">Claves de integración</h2>
+      <p className="mt-1 text-xs text-ink-400">Webhook de SoyTuTaxi: <code className="select-all text-ink-200">https://sxjhtsyguacfyixaeydz.supabase.co/functions/v1/whatsapp</code> — se configura solo en Meta con el paso "Recibir mensajes y llamadas".</p>
       <p className="mt-1 text-sm text-ink-400">Se guardan cifradas y son de solo escritura: después de guardar nadie puede volver a verlas (tampoco desde esta página). Dejá un campo vacío para no cambiarlo.</p>
       {GROUPS.map((g) => (
         <fieldset key={g.title} className="mt-5">
@@ -108,7 +109,7 @@ function Keys() {
                   <span>{st?.label ?? k}</span>
                   <Input type={k === "LIVEKIT_URL" || k === "FLIGHTS_PROVIDER" || k === "MP_COLLECTOR_ID" ? "text" : "password"} autoComplete="off" spellCheck={false}
                     value={vals[k] ?? ""} onChange={(e) => setVals({ ...vals, [k]: e.target.value })} aria-label={k}
-                    placeholder={st?.set ? "✓ guardado — escribí para reemplazar" : k === "LIVEKIT_URL" ? "wss://…livekit.cloud" : k === "FLIGHTS_PROVIDER" ? "apimarket" : ""}
+                    placeholder={st?.set ? "✓ guardado — escribí para reemplazar" : k === "WHATSAPP_VERIFY_TOKEN" ? "opcional: se genera solo al conectar" : k === "LIVEKIT_URL" ? "wss://…livekit.cloud" : k === "FLIGHTS_PROVIDER" ? "apimarket" : ""}
                     className={cx("py-2 font-mono text-xs", st?.set && "placeholder:text-emerald-300/80")} />
                   {k === "WHATSAPP_VERIFY_TOKEN"
                     ? <Button type="button" variant="ghost" className="py-1 text-xs" onClick={() => setVals({ ...vals, [k]: randomWord() })}>Generar</Button>

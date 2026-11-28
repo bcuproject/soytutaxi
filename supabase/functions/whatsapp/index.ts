@@ -273,6 +273,11 @@ Deno.serve(async (req) => {
       if (!["status", "use_number", "webhook", "calling", "templates"].includes(action)) return json(403, { error: { code: "admin_required" } });
     }
     await Promise.all([refreshRuntime(true), SEC.refresh(true)]);
+    // No verify token yet? The server makes one (Vault); it's sent to Meta by the webhook step, never shown.
+    if (action === "webhook" && !sec("WHATSAPP_VERIFY_TOKEN")) {
+      await rpc("secrets_ensure_verify_token", {}).catch(() => false);
+      await SEC.refresh(true);
+    }
     const r = await runSetup(action, body?.args ?? {}, {
       token: sec("WHATSAPP_ACCESS_TOKEN"), callbackUrl: `${SUPABASE_URL.replace(/\/$/, "")}/functions/v1/whatsapp`,
       verifyToken: sec("WHATSAPP_VERIFY_TOKEN"), wabaId: RT.wabaId, phoneNumberId: RT.phoneId,
