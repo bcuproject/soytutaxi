@@ -41,7 +41,7 @@ STT_PROMPT = ("Phone call to an airport transfer company in Buenos Aires. The ca
               "sometimes mixing both. Write exactly what is said, in the language it is said. Terms: ")
 # Silence (s) before the caller's turn counts as finished. Live transcription keeps up, so the default 0.5 s is fine.
 MIN_ENDPOINTING_S = float(os.environ.get("SOYTUTAXI_MIN_ENDPOINTING", "0.5"))
-MAX_ENDPOINTING_S = float(os.environ.get("SOYTUTAXI_MAX_ENDPOINTING", "5.0"))
+MAX_ENDPOINTING_S = float(os.environ.get("SOYTUTAXI_MAX_ENDPOINTING", "1.5"))  # cap: 5 s waits felt like dead air
 
 
 def make_stt(openai):
