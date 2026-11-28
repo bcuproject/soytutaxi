@@ -483,3 +483,39 @@ describe("typing instead of tapping the menu", () => {
     expect(wantsBooking("hola")).toBe(false);
   });
 });
+
+
+describe("date & time picker (WhatsApp Flow)", () => {
+  it("asks with the calendar form and takes date + time from it", async () => {
+    deps.dateFlowId = "FLOW123";
+    conv.draft = { direction: "from_airport", airport: "EZE", zoneCode: "palermo", placeText: "Gorriti 3944" };
+    conv.step = "direction";
+    const ask = await send({ reply: "zone:palermo" });
+    const form = ask.find((m) => m.type === "flow") as Extract<Outbound, { type: "flow" }>;
+    expect(form).toBeTruthy();
+    expect(form.flowId).toBe("FLOW123");
+    expect(form.data).toMatchObject({ min_date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), hour_label: "Hora de aterrizaje" });
+    const tomorrow = new Date(NOW.getTime() + 86400_000).toISOString().slice(0, 10);
+    const r = await handleMessage(conv, msg({ type: "flow", flow: { date: tomorrow, hour: "14", minute: "35" } } as never), deps);
+    expect(r.draft).toMatchObject({ date: tomorrow, time: "14:35" });
+    expect(previewOf(r.replies[0])).toContain("número de vuelo");   // date and time done → next question
+    delete deps.dateFlowId;
+  });
+
+  it("reads Meta's form reply and builds the form message", () => {
+    const parsed = parseWebhook({ entry: [{ changes: [{ value: { metadata: { phone_number_id: "1" }, messages: [{
+      id: "wamid.f", from: "5491100000000", timestamp: "1", type: "interactive",
+      interactive: { type: "nfm_reply", nfm_reply: { name: "flow", body: "Sent", response_json: JSON.stringify({ date: "2026-11-29", hour: "07", minute: "15", flow_token: "dt:c1" }) } },
+    }] } }] }] });
+    expect(parsed.messages[0]).toMatchObject({ type: "flow", flow: { date: "2026-11-29", hour: "07", minute: "15" } });
+    const p = toGraphPayload("5491100000000", { type: "flow", text: "¿Qué día?", flowId: "F1", cta: "Elegir fecha y hora", token: "dt:c1", screen: "WHEN", data: { a: 1 } }) as any;
+    expect(p.interactive).toMatchObject({ type: "flow", action: { name: "flow", parameters: { flow_id: "F1", flow_action: "navigate", flow_action_payload: { screen: "WHEN", data: { a: 1 } } } } });
+  });
+
+  it("the form definition only uses data the bot sends", async () => {
+    const { DATETIME_FLOW_JSON } = await import("@shared/whatsapp/setup.ts");
+    const scr = DATETIME_FLOW_JSON.screens[0];
+    const used = [...JSON.stringify(scr.layout).matchAll(/\$\{data\.(\w+)\}/g)].map((m) => m[1]);
+    for (const k of used) expect(Object.keys(scr.data)).toContain(k);
+  });
+});

@@ -9,11 +9,13 @@ export interface InboundMessage {
   from: string;              // wa_id (digits)
   profileName?: string;
   timestamp: number;         // unix seconds
-  type: "text" | "reply" | "location" | "other";
+  type: "text" | "reply" | "location" | "flow" | "other";
   text?: string;
   replyId?: string;          // interactive button/list id, or quick-reply payload
   replyTitle?: string;
   location?: { lat: number; lng: number; name?: string; address?: string };
+  /** Answers from a WhatsApp Flow form (e.g. the date & time picker). */
+  flow?: Record<string, string>;
   rawType: string;
 }
 
@@ -47,7 +49,8 @@ export type Outbound =
   | { type: "text"; text: string; previewUrl?: boolean }
   | { type: "buttons"; text: string; buttons: { id: string; title: string }[]; footer?: string }
   | { type: "list"; text: string; button: string; rows: { id: string; title: string; description?: string }[]; footer?: string }
-  | { type: "template"; name: string; language: string; params: string[]; buttonPayloads?: string[] };
+  | { type: "template"; name: string; language: string; params: string[]; buttonPayloads?: string[] }
+  | { type: "flow"; text: string; flowId: string; cta: string; token: string; screen: string; data: Record<string, unknown>; footer?: string };
 
 const enc = new TextEncoder();
 
@@ -87,6 +90,14 @@ export function parseWebhook(body: Any): ParsedWebhook {
         const base = { id: String(m.id), from, profileName: names.get(from) || undefined, timestamp: Number(m.timestamp) || 0, rawType: String(m.type) };
         if (m.type === "text") {
           out.messages.push({ ...base, type: "text", text: String(m.text?.body ?? "").slice(0, 2000) });
+        } else if (m.type === "interactive" && m.interactive?.type === "nfm_reply") {
+          // Submitted WhatsApp Flow form: response_json holds the answers.
+          let data: Record<string, string> = {};
+          try {
+            const j = JSON.parse(String(m.interactive?.nfm_reply?.response_json ?? "{}"));
+            for (const [k, v] of Object.entries(j ?? {})) if (k !== "flow_token" && (typeof v === "string" || typeof v === "number")) data[k] = String(v).slice(0, 100);
+          } catch { data = {}; }
+          out.messages.push({ ...base, type: "flow", flow: data });
         } else if (m.type === "interactive") {
           const r = m.interactive?.button_reply ?? m.interactive?.list_reply;
           out.messages.push({ ...base, type: "reply", replyId: String(r?.id ?? ""), replyTitle: String(r?.title ?? "") });
@@ -157,6 +168,19 @@ export function toGraphPayload(to: string, m: Outbound): Record<string, unknown>
           },
         },
       };
+    case "flow":
+      return {
+        ...base, type: "interactive",
+        interactive: {
+          type: "flow",
+          body: { text: cut(m.text, 1024) },
+          ...(m.footer ? { footer: { text: cut(m.footer, 60) } } : {}),
+          action: { name: "flow", parameters: {
+            flow_message_version: "3", flow_id: m.flowId, flow_token: cut(m.token, 200), flow_cta: cut(m.cta, 20),
+            flow_action: "navigate", flow_action_payload: { screen: m.screen, data: m.data },
+          } },
+        },
+      };
     case "template":
       return {
         ...base, type: "template",
@@ -176,6 +200,7 @@ export function previewOf(m: Outbound): string {
   switch (m.type) {
     case "text": return m.text;
     case "buttons": return `${m.text}\n[${m.buttons.map((b) => b.title).join("] [")}]`;
+    case "flow": return `${m.text}\n[📅 ${m.cta}]`;
     case "list": return `${m.text}\n▸ ${m.button}: ${m.rows.map((r) => r.title).join(" · ")}`;
     case "template": return `(plantilla ${m.name}) ${m.params.join(" · ")}`;
   }

@@ -270,7 +270,7 @@ Deno.serve(async (req) => {
     } else {
       const keyOk = await rpc<boolean>("wa_outbox_key_ok", { p_key: req.headers.get("x-outbox-key") ?? "" }).catch(() => false);
       if (!keyOk) return json(401, { error: { code: "unauthenticated" } });
-      if (!["status", "use_number", "webhook", "calling", "templates", "test_send"].includes(action)) return json(403, { error: { code: "admin_required" } });
+      if (!["status", "use_number", "webhook", "calling", "templates", "test_send", "flows"].includes(action)) return json(403, { error: { code: "admin_required" } });
     }
     await Promise.all([refreshRuntime(true), SEC.refresh(true)]);
     // No verify token yet? The server makes one (Vault); it's sent to Meta by the webhook step, never shown.

@@ -81,6 +81,8 @@ export interface EngineDeps {
   /** Free questions (rides, bookings, policies) answered by AI from the facts and this number's memory. */
   assistant?: Assistant | null;
   customerContext?(phone: string): Promise<CustomerContext | null>;
+  /** Published WhatsApp Flow with a calendar + hour/minute pickers. Absent → date buttons and typed time. */
+  dateFlowId?: string | null;
 }
 
 export interface EngineResult {
@@ -204,6 +206,9 @@ class Turn {
       if (/^\s*2\s*$/.test(this.text)) return this.listBookings();
       if (/^\s*3\s*$/.test(this.text)) return this.handoff("staffOn");
     }
+
+    // Date & time picked in the WhatsApp form.
+    if (this.msg.type === "flow") return this.applyDateTimeForm();
 
     // Button / list replies carry exact values.
     if (this.id) return this.applyReply();
@@ -597,6 +602,7 @@ class Turn {
         return;
       case "date":
         this.step = "date";
+        if (this.deps.dateFlowId && !d.time) return this.askDateTimeForm();
         this.replies.push({ type: "buttons", text: `${this.t("askDate", { what: this.t(d.direction === "to_airport" ? "dateTo" : "dateFrom") })}\n${this.t("dateHint")}`,
           buttons: [{ id: "date:today", title: this.t("btnToday") }, { id: "date:tomorrow", title: this.t("btnTomorrow") }] });
         return;
@@ -621,6 +627,34 @@ class Turn {
         this.replies.push({ type: "list", text: this.t("askCarry"), button: this.t("carryButton"), rows: n("carry", 0, 9) });
         return;
     }
+  }
+
+  /** One message with a "Pick date & time" button that opens the calendar form (typed answers still work). */
+  private askDateTimeForm() {
+    const cfg = this.deps.cfg, d = this.draft, to = d.direction === "to_airport";
+    this.replies.push({
+      type: "flow", flowId: this.deps.dateFlowId!, screen: "WHEN", token: `dt:${this.conv.id}`,
+      cta: this.t("flowCta"),
+      text: `${this.t("askDate", { what: this.t(to ? "dateTo" : "dateFrom") })}\n${this.t("flowHint")}`,
+      data: {
+        intro: this.t(to ? "flowIntroTo" : "flowIntroFrom"),
+        min_date: this.today, max_date: addDaysLocal(this.today, cfg.policy.config.max_advance_days),
+        date_label: this.t("flowDate"), hour_label: this.t(to ? "flowHourTo" : "flowHourFrom"), minute_label: this.t("flowMinute"),
+      },
+    });
+  }
+
+  private applyDateTimeForm() {
+    const f = this.msg.flow ?? {};
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(f.date ?? "") ? f.date : (Number.isFinite(Number(f.date)) && f.date ? new Date(Number(f.date)).toISOString().slice(0, 10) : null);
+    const hh = /^\d{1,2}$/.test(f.hour ?? "") ? f.hour!.padStart(2, "0") : null;
+    const mm = /^\d{1,2}$/.test(f.minute ?? "") ? f.minute!.padStart(2, "0") : "00";
+    if (date) this.draft.date = date;
+    if (hh && +hh < 24 && +mm < 60) this.draft.time = `${hh}:${mm}`;
+    delete this.draft.dateOptions;
+    this.clearQuote();
+    if (["menu", "done", "handoff"].includes(this.step)) this.step = "direction";
+    return this.next();
   }
 
   private askDatePick() {

@@ -8,7 +8,7 @@
 import { GRAPH_VERSION } from "./meta.ts";
 
 export type SetupAction = "status" | "add_number" | "request_code" | "verify_code" | "register" | "use_number"
-  | "webhook" | "calling" | "templates" | "test_send";
+  | "webhook" | "calling" | "templates" | "test_send" | "flows";
 
 export interface SetupEnv {
   token: string;
@@ -71,6 +71,36 @@ export const TEMPLATES: { kind: string; name: string; category: "UTILITY"; body:
   { kind: "notify.driver.released", name: "stt_driver_released", category: "UTILITY",
     body: "El viaje {{1}} del {{2}} ya no está asignado a vos. Gracias.", example: ["STT-AB12CD", "sábado 28/11, 10:30"] },
 ];
+
+/** WhatsApp Flow: calendar + hour/minute dropdowns. No data endpoint: the bot passes the dates and labels when sending. */
+export const DATETIME_FLOW_NAME = "stt_datetime_v1";
+const two = (n: number) => String(n).padStart(2, "0");
+export const DATETIME_FLOW_JSON = {
+  version: "7.0",
+  screens: [{
+    id: "WHEN", title: "SoyTuTaxi", terminal: true, success: true,
+    data: {
+      intro: { type: "string", __example__: "Elegí el día y la hora programada de aterrizaje de tu vuelo." },
+      min_date: { type: "string", __example__: "2026-11-28" },
+      max_date: { type: "string", __example__: "2027-05-27" },
+      date_label: { type: "string", __example__: "Fecha" },
+      hour_label: { type: "string", __example__: "Hora de aterrizaje" },
+      minute_label: { type: "string", __example__: "Minutos" },
+    },
+    layout: {
+      type: "SingleColumnLayout",
+      children: [
+        { type: "TextBody", text: "${data.intro}" },
+        { type: "DatePicker", name: "date", label: "${data.date_label}", "min-date": "${data.min_date}", "max-date": "${data.max_date}", required: true },
+        { type: "Dropdown", name: "hour", label: "${data.hour_label}", required: true,
+          "data-source": Array.from({ length: 24 }, (_, h) => ({ id: two(h), title: `${two(h)} h` })) },
+        { type: "Dropdown", name: "minute", label: "${data.minute_label}", required: true,
+          "data-source": Array.from({ length: 12 }, (_, i) => ({ id: two(i * 5), title: `:${two(i * 5)}` })) },
+        { type: "Footer", label: "OK", "on-click-action": { name: "complete", payload: { date: "${form.date}", hour: "${form.hour}", minute: "${form.minute}" } } },
+      ],
+    },
+  }],
+};
 
 export interface SetupResult { ok: boolean; status: number; body: Record<string, unknown>; save?: { phoneNumberId?: string; wabaId?: string; templates?: Record<string, { name: string; language: string }> } }
 
@@ -212,6 +242,24 @@ export async function runSetup(action: SetupAction, args: Record<string, unknown
       const r = await g("POST", `${phone}/messages`, { messaging_product: "whatsapp", to, type: "template",
         template: { name: "hello_world", language: { code: "en_US" } } });
       return r.ok ? { ok: true, status: 200, body: { sent: r.data } } : fail(400, "meta_error", { meta: metaError(r.data) });
+    }
+
+    case "flows": {
+      // Creates (or finds) and publishes the date & time form, then saves its id for the bot.
+      if (!waba) return fail(422, "waba_required");
+      const list = await g("GET", `${waba}/flows?fields=id,name,status&limit=100`);
+      let flow = list.ok ? (list.data?.data ?? []).find((f: { name: string }) => f.name === DATETIME_FLOW_NAME) : null;
+      if (!flow) {
+        const c = await g("POST", `${waba}/flows`, { name: DATETIME_FLOW_NAME, categories: ["APPOINTMENT_BOOKING"], flow_json: JSON.stringify(DATETIME_FLOW_JSON), publish: true });
+        if (!c.ok) return fail(400, "meta_error", { step: "create_flow", meta: metaError(c.data) });
+        if (c.data?.validation_errors?.length) return fail(400, "flow_invalid", { id: c.data.id, errors: c.data.validation_errors });
+        flow = { id: c.data.id, name: DATETIME_FLOW_NAME, status: "PUBLISHED" };
+      } else if (flow.status === "DRAFT") {
+        const pub = await g("POST", `${flow.id}/publish`);
+        if (!pub.ok) return fail(400, "meta_error", { step: "publish_flow", id: flow.id, meta: metaError(pub.data) });
+        flow.status = "PUBLISHED";
+      }
+      return { ok: true, status: 200, body: { flow }, save: { templates: { "flow.datetime": { name: String(flow.id), language: "flow" } } } };
     }
 
     case "templates": {

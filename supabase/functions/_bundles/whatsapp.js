@@ -324,6 +324,15 @@ function parseWebhook(body) {
         const base = { id: String(m.id), from, profileName: names.get(from) || void 0, timestamp: Number(m.timestamp) || 0, rawType: String(m.type) };
         if (m.type === "text") {
           out.messages.push({ ...base, type: "text", text: String(m.text?.body ?? "").slice(0, 2e3) });
+        } else if (m.type === "interactive" && m.interactive?.type === "nfm_reply") {
+          let data = {};
+          try {
+            const j = JSON.parse(String(m.interactive?.nfm_reply?.response_json ?? "{}"));
+            for (const [k, v2] of Object.entries(j ?? {})) if (k !== "flow_token" && (typeof v2 === "string" || typeof v2 === "number")) data[k] = String(v2).slice(0, 100);
+          } catch {
+            data = {};
+          }
+          out.messages.push({ ...base, type: "flow", flow: data });
         } else if (m.type === "interactive") {
           const r = m.interactive?.button_reply ?? m.interactive?.list_reply;
           out.messages.push({ ...base, type: "reply", replyId: String(r?.id ?? ""), replyTitle: String(r?.title ?? "") });
@@ -397,6 +406,24 @@ function toGraphPayload(to, m) {
           }
         }
       };
+    case "flow":
+      return {
+        ...base,
+        type: "interactive",
+        interactive: {
+          type: "flow",
+          body: { text: cut(m.text, 1024) },
+          ...m.footer ? { footer: { text: cut(m.footer, 60) } } : {},
+          action: { name: "flow", parameters: {
+            flow_message_version: "3",
+            flow_id: m.flowId,
+            flow_token: cut(m.token, 200),
+            flow_cta: cut(m.cta, 20),
+            flow_action: "navigate",
+            flow_action_payload: { screen: m.screen, data: m.data }
+          } }
+        }
+      };
     case "template":
       return {
         ...base,
@@ -419,6 +446,9 @@ function previewOf(m) {
     case "buttons":
       return `${m.text}
 [${m.buttons.map((b) => b.title).join("] [")}]`;
+    case "flow":
+      return `${m.text}
+[\u{1F4C5} ${m.cta}]`;
     case "list":
       return `${m.text}
 \u25B8 ${m.button}: ${m.rows.map((r) => r.title).join(" \xB7 ")}`;
@@ -1365,6 +1395,47 @@ var TEMPLATES = [
     example: ["STT-AB12CD", "s\xE1bado 28/11, 10:30"]
   }
 ];
+var DATETIME_FLOW_NAME = "stt_datetime_v1";
+var two = (n) => String(n).padStart(2, "0");
+var DATETIME_FLOW_JSON = {
+  version: "7.0",
+  screens: [{
+    id: "WHEN",
+    title: "SoyTuTaxi",
+    terminal: true,
+    success: true,
+    data: {
+      intro: { type: "string", __example__: "Eleg\xED el d\xEDa y la hora programada de aterrizaje de tu vuelo." },
+      min_date: { type: "string", __example__: "2026-11-28" },
+      max_date: { type: "string", __example__: "2027-05-27" },
+      date_label: { type: "string", __example__: "Fecha" },
+      hour_label: { type: "string", __example__: "Hora de aterrizaje" },
+      minute_label: { type: "string", __example__: "Minutos" }
+    },
+    layout: {
+      type: "SingleColumnLayout",
+      children: [
+        { type: "TextBody", text: "${data.intro}" },
+        { type: "DatePicker", name: "date", label: "${data.date_label}", "min-date": "${data.min_date}", "max-date": "${data.max_date}", required: true },
+        {
+          type: "Dropdown",
+          name: "hour",
+          label: "${data.hour_label}",
+          required: true,
+          "data-source": Array.from({ length: 24 }, (_, h) => ({ id: two(h), title: `${two(h)} h` }))
+        },
+        {
+          type: "Dropdown",
+          name: "minute",
+          label: "${data.minute_label}",
+          required: true,
+          "data-source": Array.from({ length: 12 }, (_, i) => ({ id: two(i * 5), title: `:${two(i * 5)}` }))
+        },
+        { type: "Footer", label: "OK", "on-click-action": { name: "complete", payload: { date: "${form.date}", hour: "${form.hour}", minute: "${form.minute}" } } }
+      ]
+    }
+  }]
+};
 async function runSetup(action, args, env2, g) {
   const fail = (status, code, extra = {}) => ({ ok: false, status, body: { error: { code, ...extra } } });
   const str2 = (v, max = 100) => typeof v === "string" ? v.trim().slice(0, max) : "";
@@ -1499,6 +1570,22 @@ async function runSetup(action, args, env2, g) {
       });
       return r.ok ? { ok: true, status: 200, body: { sent: r.data } } : fail(400, "meta_error", { meta: metaError(r.data) });
     }
+    case "flows": {
+      if (!waba) return fail(422, "waba_required");
+      const list = await g("GET", `${waba}/flows?fields=id,name,status&limit=100`);
+      let flow = list.ok ? (list.data?.data ?? []).find((f) => f.name === DATETIME_FLOW_NAME) : null;
+      if (!flow) {
+        const c = await g("POST", `${waba}/flows`, { name: DATETIME_FLOW_NAME, categories: ["APPOINTMENT_BOOKING"], flow_json: JSON.stringify(DATETIME_FLOW_JSON), publish: true });
+        if (!c.ok) return fail(400, "meta_error", { step: "create_flow", meta: metaError(c.data) });
+        if (c.data?.validation_errors?.length) return fail(400, "flow_invalid", { id: c.data.id, errors: c.data.validation_errors });
+        flow = { id: c.data.id, name: DATETIME_FLOW_NAME, status: "PUBLISHED" };
+      } else if (flow.status === "DRAFT") {
+        const pub = await g("POST", `${flow.id}/publish`);
+        if (!pub.ok) return fail(400, "meta_error", { step: "publish_flow", id: flow.id, meta: metaError(pub.data) });
+        flow.status = "PUBLISHED";
+      }
+      return { ok: true, status: 200, body: { flow }, save: { templates: { "flow.datetime": { name: String(flow.id), language: "flow" } } } };
+    }
     case "templates": {
       if (!waba) return fail(422, "waba_required");
       const existing = await g("GET", `${waba}/message_templates?fields=name,status,language&limit=200`);
@@ -1588,6 +1675,14 @@ var es = {
   btnToday: "Hoy",
   btnTomorrow: "Ma\xF1ana",
   dateHint: "O escrib\xED la fecha, ej. *28/11*",
+  flowCta: "Elegir fecha y hora",
+  flowHint: "Toc\xE1 *\u{1F4C5} Elegir fecha y hora*, o escrib\xED la fecha y la hora, ej. *28/11 14:30*.",
+  flowIntroFrom: "Eleg\xED el d\xEDa y la hora programada de aterrizaje de tu vuelo.",
+  flowIntroTo: "Eleg\xED el d\xEDa y la hora en que te buscamos.",
+  flowDate: "Fecha",
+  flowHourFrom: "Hora de aterrizaje",
+  flowHourTo: "Hora de b\xFAsqueda",
+  flowMinute: "Minutos",
   askDateWhich: "\xBFQu\xE9 fecha quisiste decir?",
   askTimeFrom: "\xBFA qu\xE9 hora *aterriza* tu vuelo? (hora programada, ej. *14:30*)",
   askTimeTo: "\xBFA qu\xE9 hora te buscamos? (ej. *06:15*)",
@@ -1728,6 +1823,14 @@ Or tap a button (or type *1* book \xB7 *2* my booking \xB7 *3* talk to a person)
   btnToday: "Today",
   btnTomorrow: "Tomorrow",
   dateHint: "Or type the date, e.g. *Nov 28*",
+  flowCta: "Pick date & time",
+  flowHint: "Tap *\u{1F4C5} Pick date & time*, or type the date and time, e.g. *Nov 28 2:30pm*.",
+  flowIntroFrom: "Pick the day and your flight's scheduled landing time.",
+  flowIntroTo: "Pick the day and the time we should pick you up.",
+  flowDate: "Date",
+  flowHourFrom: "Landing hour",
+  flowHourTo: "Pickup hour",
+  flowMinute: "Minutes",
   askDateWhich: "Which date did you mean?",
   askTimeFrom: "What time does your flight *land*? (scheduled, e.g. *2:30pm*)",
   askTimeTo: "What time should we pick you up? (e.g. *6:15am*)",
@@ -2157,6 +2260,7 @@ var Turn = class {
       if (/^\s*2\s*$/.test(this.text)) return this.listBookings();
       if (/^\s*3\s*$/.test(this.text)) return this.handoff("staffOn");
     }
+    if (this.msg.type === "flow") return this.applyDateTimeForm();
     if (this.id) return this.applyReply();
     if (this.msg.type === "location" && this.msg.location) return this.applyLocation();
     if (this.msg.type === "other") {
@@ -2685,6 +2789,7 @@ ${lines.join("\n\n")}`);
         return;
       case "date":
         this.step = "date";
+        if (this.deps.dateFlowId && !d.time) return this.askDateTimeForm();
         this.replies.push({
           type: "buttons",
           text: `${this.t("askDate", { what: this.t(d.direction === "to_airport" ? "dateTo" : "dateFrom") })}
@@ -2713,6 +2818,39 @@ ${this.t("dateHint")}`,
         this.replies.push({ type: "list", text: this.t("askCarry"), button: this.t("carryButton"), rows: n("carry", 0, 9) });
         return;
     }
+  }
+  /** One message with a "Pick date & time" button that opens the calendar form (typed answers still work). */
+  askDateTimeForm() {
+    const cfg = this.deps.cfg, d = this.draft, to = d.direction === "to_airport";
+    this.replies.push({
+      type: "flow",
+      flowId: this.deps.dateFlowId,
+      screen: "WHEN",
+      token: `dt:${this.conv.id}`,
+      cta: this.t("flowCta"),
+      text: `${this.t("askDate", { what: this.t(to ? "dateTo" : "dateFrom") })}
+${this.t("flowHint")}`,
+      data: {
+        intro: this.t(to ? "flowIntroTo" : "flowIntroFrom"),
+        min_date: this.today,
+        max_date: addDaysLocal(this.today, cfg.policy.config.max_advance_days),
+        date_label: this.t("flowDate"),
+        hour_label: this.t(to ? "flowHourTo" : "flowHourFrom"),
+        minute_label: this.t("flowMinute")
+      }
+    });
+  }
+  applyDateTimeForm() {
+    const f = this.msg.flow ?? {};
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(f.date ?? "") ? f.date : Number.isFinite(Number(f.date)) && f.date ? new Date(Number(f.date)).toISOString().slice(0, 10) : null;
+    const hh = /^\d{1,2}$/.test(f.hour ?? "") ? f.hour.padStart(2, "0") : null;
+    const mm = /^\d{1,2}$/.test(f.minute ?? "") ? f.minute.padStart(2, "0") : "00";
+    if (date) this.draft.date = date;
+    if (hh && +hh < 24 && +mm < 60) this.draft.time = `${hh}:${mm}`;
+    delete this.draft.dateOptions;
+    this.clearQuote();
+    if (["menu", "done", "handoff"].includes(this.step)) this.step = "direction";
+    return this.next();
   }
   askDatePick() {
     this.step = "date_pick";
@@ -3098,7 +3236,7 @@ async function composeNotification(kind, ctx, opts) {
 }
 
 // supabase/functions/_shared/whatsapp/service.ts
-var kindOf = (m) => m.type === "buttons" || m.type === "list" ? "interactive" : m.type;
+var kindOf = (m) => m.type === "buttons" || m.type === "list" || m.type === "flow" ? "interactive" : m.type;
 async function sendAndRecord(deps2, conversationId, to, m, sentBy = null) {
   const id = await deps2.db.recordMessage(conversationId, "out", null, kindOf(m), m, previewOf(m), "queued", sentBy);
   const r = await deps2.sender.send(to, m);
@@ -3180,7 +3318,8 @@ async function handleOne(msg, cfg, deps2) {
       cancelBooking: deps2.db.passengerCancel ? (phone, ref, ok) => deps2.db.passengerCancel(cfg.operatorId, phone, ref, ok, "whatsapp") : void 0,
       rate: deps2.db.rate ? (phone, id, n, c) => deps2.db.rate(cfg.operatorId, phone, id, n, c) : void 0,
       assistant: deps2.assistant ?? null,
-      customerContext: deps2.db.customerContext ? (phone) => deps2.db.customerContext(cfg.operatorId, phone) : void 0
+      customerContext: deps2.db.customerContext ? (phone) => deps2.db.customerContext(cfg.operatorId, phone) : void 0,
+      dateFlowId: deps2.templates?.["flow.datetime"]?.name ?? null
     });
     const saved = await deps2.db.saveConversation(row.id, row.version, r.step, r.draft, r.locale, r.bookingId ?? null, r.needsStaff ? true : null);
     if (saved === null) continue;
@@ -3192,11 +3331,12 @@ async function handleOne(msg, cfg, deps2) {
 function inboundPreview(m) {
   if (m.type === "text") return m.text ?? "";
   if (m.type === "reply") return `\u25B8 ${m.replyTitle ?? m.replyId}`;
+  if (m.type === "flow") return `\u{1F4C5} ${Object.values(m.flow ?? {}).join(" ")}`.trim();
   if (m.type === "location") return `\u{1F4CD} ${m.location?.name ?? ""} ${m.location?.address ?? ""} (${m.location?.lat.toFixed(5)}, ${m.location?.lng.toFixed(5)})`.trim();
   return `(${m.rawType})`;
 }
 function sanitize(m) {
-  return { type: m.type, text: m.text, replyId: m.replyId, replyTitle: m.replyTitle, location: m.location, rawType: m.rawType };
+  return { type: m.type, text: m.text, replyId: m.replyId, replyTitle: m.replyTitle, location: m.location, flow: m.flow, rawType: m.rawType };
 }
 async function processOutbox(deps2, limit = 20) {
   const cfg = await deps2.config();
@@ -3553,7 +3693,7 @@ Deno.serve(async (req) => {
     } else {
       const keyOk = await rpc("wa_outbox_key_ok", { p_key: req.headers.get("x-outbox-key") ?? "" }).catch(() => false);
       if (!keyOk) return json(401, { error: { code: "unauthenticated" } });
-      if (!["status", "use_number", "webhook", "calling", "templates", "test_send"].includes(action)) return json(403, { error: { code: "admin_required" } });
+      if (!["status", "use_number", "webhook", "calling", "templates", "test_send", "flows"].includes(action)) return json(403, { error: { code: "admin_required" } });
     }
     await Promise.all([refreshRuntime(true), SEC.refresh(true)]);
     if (action === "webhook" && !sec("WHATSAPP_VERIFY_TOKEN")) {

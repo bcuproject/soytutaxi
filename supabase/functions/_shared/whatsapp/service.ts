@@ -78,7 +78,7 @@ export interface ServiceDeps {
   log?: (o: Record<string, unknown>) => void;
 }
 
-const kindOf = (m: Outbound) => (m.type === "buttons" || m.type === "list" ? "interactive" : m.type);
+const kindOf = (m: Outbound) => (m.type === "buttons" || m.type === "list" || m.type === "flow" ? "interactive" : m.type);
 
 /** Send and record one outbound message on a conversation. */
 export async function sendAndRecord(deps: ServiceDeps, conversationId: string, to: string, m: Outbound, sentBy: string | null = null) {
@@ -150,6 +150,7 @@ async function handleOne(msg: InboundMessage, cfg: OperatorConfig, deps: Service
       rate: deps.db.rate ? (phone, id, n, c) => deps.db.rate!(cfg.operatorId, phone, id, n, c) : undefined,
       assistant: deps.assistant ?? null,
       customerContext: deps.db.customerContext ? (phone) => deps.db.customerContext!(cfg.operatorId, phone) : undefined,
+      dateFlowId: deps.templates?.["flow.datetime"]?.name ?? null,
     });
     const saved = await deps.db.saveConversation(row.id, row.version, r.step, r.draft, r.locale, r.bookingId ?? null, r.needsStaff ? true : null);
     if (saved === null) continue;    // another message for this chat was processed meanwhile → redo with fresh state
@@ -162,12 +163,13 @@ async function handleOne(msg: InboundMessage, cfg: OperatorConfig, deps: Service
 function inboundPreview(m: InboundMessage) {
   if (m.type === "text") return m.text ?? "";
   if (m.type === "reply") return `▸ ${m.replyTitle ?? m.replyId}`;
+  if (m.type === "flow") return `📅 ${Object.values(m.flow ?? {}).join(" ")}`.trim();
   if (m.type === "location") return `📍 ${m.location?.name ?? ""} ${m.location?.address ?? ""} (${m.location?.lat.toFixed(5)}, ${m.location?.lng.toFixed(5)})`.trim();
   return `(${m.rawType})`;
 }
 
 function sanitize(m: InboundMessage) {
-  return { type: m.type, text: m.text, replyId: m.replyId, replyTitle: m.replyTitle, location: m.location, rawType: m.rawType };
+  return { type: m.type, text: m.text, replyId: m.replyId, replyTitle: m.replyTitle, location: m.location, flow: m.flow, rawType: m.rawType };
 }
 
 /** Drain notification jobs. Conversations for the recipient are opened so the message shows in the dispatch inbox. */
