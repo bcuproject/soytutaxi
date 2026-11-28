@@ -72,12 +72,12 @@ jobs:
             for f in soytutaxi-chofer.apk soytutaxi-chofer-arm64.apk soytutaxi-chofer-arm32.apk; do
               "$BT/apksigner" verify "$f" >/dev/null || { echo "::error::$f: firma inválida"; exit 1; }
               unzip -tq "$f" >/dev/null || { echo "::error::$f: archivo dañado"; exit 1; }
-              MIN=$("$BT/aapt2" dump badging "$f" | sed -n "s/^sdkVersion:'\([0-9]*\)'.*/\1/p")
+              MIN=$( ("$BT/aapt2" dump badging "$f" 2>/dev/null || "$BT/aapt" dump badging "$f" 2>/dev/null) | grep -oE "sdkVersion:'[0-9]+'" | grep -oE "[0-9]+" | head -1 || true)
               SIZE=$(du -m "$f" | cut -f1)
               echo "- \`$f\`: ${SIZE} MB · Android API ${MIN}+ · firma OK"
             done
           } | tee apk-check.md
-          echo "MINSDK=$("$BT/aapt2" dump badging soytutaxi-chofer.apk | sed -n "s/^sdkVersion:'\([0-9]*\)'.*/\1/p")" >> $GITHUB_ENV
+          ls "$BT" | grep -E "^aapt" >&2; ("$BT/aapt2" dump badging soytutaxi-chofer.apk 2>&1 || true) | head -4 >&2
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
