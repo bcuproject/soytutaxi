@@ -93,6 +93,14 @@ This release is the dispatch backend and web front end for Buenos Aires transfer
 - Sofía can put a caller through live: the Central shows "Sofía te pasa una llamada"; **Atender** joins the call's LiveKit room from the browser and Sofía steps out.
   If nobody answers within 45 s she takes the call back and leaves a callback request.
 
+## WhatsApp assistant and customer memory
+- With `AI_API_KEY` set, free questions on WhatsApp ("¿dónde me espera el chofer?", "do you have child seats?", "who is my driver?")
+  are answered from the operator's facts and the customer's own memory. The AI only chooses an action; booking, cancelling and
+  hand-off to a person run through the same validated flows as the buttons. Without the key, the bot works as before.
+- Memory (`wa_customer_context`, per phone number): the last 8 bookings with live ride details (driver first name, car, plate, on the way —
+  only after a driver accepted), the last 24 WhatsApp messages (30 days) and the last 5 calls (60 days) with Sofía's note and transcript.
+  Sofía reads the same memory at the start of each call and saves her transcript when it ends; the Central shows it under 📋 Historial.
+
 Before taking real bookings, work through `docs/GO_LIVE.md`.
 
 ## Live staging (26 Nov 2026)

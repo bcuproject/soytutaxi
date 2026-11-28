@@ -140,6 +140,8 @@ export interface Backend {
   driverStatement(batchId?: string | null): Promise<DriverStatement>;
   report(from: string, to: string): Promise<Report>;
   joinTransfer(callId: string): Promise<{ url: string; token: string }>;
+  /** Previous calls from this number (who answered, Sofía's note and transcript). */
+  callerCalls(phone: string): Promise<PastCall[]>;
   accounts(): Promise<Account[]>;
   saveAccount(a: Partial<Account> & { name: string }): Promise<string>;
   setBookingAccount(bookingId: string, version: number, accountId: string | null, ref?: string | null): Promise<void>;
@@ -171,6 +173,9 @@ export interface Report {
   daily: { day: string; bookings: number; completed: number }[]; topZones: { zone: string; bookings: number }[];
   drivers: { driverId: string; fullName: string; trips: number; earningsMinor: number; currency: string | null; rating: number | null; ratings: number; noShows: number }[];
 }
+
+export interface PastCall { id: string; startedAt: string; status: string; durationS: number | null; handledBy: "desk" | "bot"; transferred: boolean;
+  note: string | null; transcript: string | null; bookingRef: string | null }
 
 export interface AccountInvoice { id: string; number: string; periodStart: string; periodEnd: string; currency: string; totalMinor: number; state: "draft" | "issued" | "paid" | "void"; dueOn: string | null; overdue: boolean }
 export interface Account {
@@ -458,6 +463,13 @@ class DemoBackend implements Backend {
       drivers: [] };
   }
   async joinTransfer(): Promise<{ url: string; token: string }> { throw LIVE_ONLY(); }
+  async callerCalls(phone: string): Promise<PastCall[]> {
+    const past = this.calls.filter((c) => c.phone === phone).map((c) => ({ id: c.id, startedAt: c.startedAt, status: c.status, durationS: c.durationS,
+      handledBy: c.handledBy, transferred: !!c.transferTakenAt, note: c.botNote, transcript: null, bookingRef: c.bookingRef }));
+    return [...past, { id: "demo-past", startedAt: new Date(Date.now() - 26 * 3600_000).toISOString(), status: "ended", durationS: 140,
+      handledBy: "bot", transferred: false, note: "Preguntó si hay silla de bebé para su viaje del sábado.", bookingRef: null,
+      transcript: "Sofía: ¡Hola! Gracias por llamar a SoyTuTaxi…\nCliente: Hola, viajo el sábado con un bebé, ¿tienen silla?\nSofía: Le dejo la consulta al equipo y te escriben por WhatsApp." }];
+  }
   private demoAccounts: Account[] = [
     { id: "acc-1", name: "Hotel Alvear Palace (demo)", kind: "hotel", taxId: "30-12345678-9", email: "conserjeria@example.com", phone: null, address: "Av. Alvear 1891",
       discountPercent: 10, paymentTermsDays: 30, active: true, notes: null, unbilled: [{ currency: "ARS", amountMinor: 18450000, trips: 6 }], upcoming: 2,
@@ -822,6 +834,14 @@ class SupabaseBackend implements Backend {
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new CommandError(body?.error?.code ?? "call_error", body?.error?.message);
     return body as { url: string; token: string };
+  }
+  async callerCalls(phone: string): Promise<PastCall[]> {
+    const { data, error } = await this.sb.from("wa_calls").select("id, started_at, status, duration_s, handled_by, transfer_taken_at, bot_note, transcript, bookings(reference)")
+      .eq("phone_e164", phone).order("started_at", { ascending: false }).limit(10);
+    if (error) throw new CommandError(error.message);
+    // deno-lint-ignore no-explicit-any
+    return (data ?? []).map((r: any) => ({ id: r.id, startedAt: r.started_at, status: r.status, durationS: r.duration_s, handledBy: r.handled_by,
+      transferred: !!r.transfer_taken_at, note: r.bot_note, transcript: r.transcript, bookingRef: r.bookings?.reference ?? null }));
   }
   async accounts() { return this.rpc<Account[]>("finance_accounts"); }
   async saveAccount(a: Partial<Account> & { name: string }) {

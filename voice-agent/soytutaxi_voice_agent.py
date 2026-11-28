@@ -38,7 +38,8 @@ def selected(attributes) -> bool:
 
 def greeting(facts) -> str:
     name = (facts.get("callerName") or "").split(" ")[0]
-    hola = f"¡Hola{(' ' + name) if name else ''}!"
+    again = bool((facts.get("customer") or {}).get("previousCalls") or (facts.get("customer") or {}).get("recentWhatsApp"))
+    hola = f"¡Hola{' de nuevo' if again else ''}{(', ' + name) if name and again else (' ' + name) if name else ''}!"
     return (f"{hola} Gracias por llamar a SoyTuTaxi, traslados con tarifa fija desde y hacia Ezeiza y Aeroparque. "
             "Soy Sofía, la asistente virtual. ¿En qué te puedo ayudar? You can also speak English.")
 
@@ -86,6 +87,13 @@ Arrivals: we track the flight; the driver meets them this many minutes after sch
 Payment options: {', '.join(rules.get('paymentModes', []))}.
 Fares are fixed per zone and vehicle; get_quote gives the exact price.
 Caller's upcoming bookings: {json.dumps(facts.get('upcomingBookings', []), ensure_ascii=False)}
+
+WHAT WE ALREADY KNOW ABOUT THIS CALLER (this phone number only: bookings with live ride details, recent WhatsApp
+messages, previous calls with notes and the end of the transcript):
+{json.dumps(facts.get('customer') or {}, ensure_ascii=False)}
+Use it so they never have to repeat themselves: if they call back about something from a previous call or chat,
+pick it up from there ("veo que ayer hablamos de…"). You may tell them their driver's first name, car, plate and
+whether he is on the way, and their flight status, only from this data. If a callback is pending, say the team has it.
 """
 
 
@@ -120,6 +128,27 @@ def quote_args(direction, airport, zone, address, date, time, passengers, large_
     return {"direction": direction, "airport": (airport or "").upper()[:3], "zone": zone, "address": address,
             "date": date, "time": time, "passengers": passengers, "largeBags": large_bags, "carryOn": carry_on,
             "flight": flight or "", "vehicleClass": vehicle or ""}
+
+
+def transcript_text(session) -> str:
+    """Caller/Sofía lines of this call, for the memory of the next contact."""
+    lines = []
+    for item in getattr(getattr(session, "history", None), "items", []) or []:
+        if getattr(item, "type", None) != "message" or getattr(item, "role", None) not in ("user", "assistant"):
+            continue
+        text = (getattr(item, "text_content", None) or "").strip()
+        if text:
+            lines.append(("Cliente" if item.role == "user" else "Sofía") + ": " + text)
+    return "\n".join(lines)[-8000:]
+
+
+async def save_transcript(session, tools):
+    try:
+        text = transcript_text(session)
+        if text:
+            await tools.post("transcript", {"transcript": text})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("soytutaxi transcript not saved (%s)", type(exc).__name__)
 
 
 async def run_call(ctx, caller):
@@ -291,6 +320,7 @@ async def run_call(ctx, caller):
         finally:
             for w in watchers:
                 w.cancel()
+            await save_transcript(session, tools)
             try:
                 await session.aclose()
             except Exception:  # noqa: BLE001

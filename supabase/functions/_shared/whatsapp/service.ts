@@ -3,7 +3,8 @@
 
 import type { OperatorConfig } from "../domain/types.ts";
 import type { CancelTerms, Store } from "../api/store.ts";
-import type { Extractor } from "./ai.ts";
+import type { Assistant, Extractor } from "./ai.ts";
+import type { CustomerContext } from "./facts.ts";
 import { handleMessage, type BookingSummary, type ConversationState, type Draft, type Step } from "./engine.ts";
 import { previewOf, type CallApi, type InboundMessage, type Outbound, type ParsedWebhook, type Sender, type StatusUpdate } from "./meta.ts";
 import { composeNotification, type NotificationContext, type TemplateMap } from "./notify.ts";
@@ -48,6 +49,8 @@ export interface WaDb {
   callByProvider(providerCallId: string): Promise<VoiceCall | null>;
   callNote(providerCallId: string, note: string, callback: boolean): Promise<void>;
   callTransferRequest?(providerCallId: string, reason: string): Promise<{ ok: boolean }>;
+  customerContext?(operatorId: string, phone: string): Promise<CustomerContext | null>;
+  callTranscript?(providerCallId: string, transcript: string): Promise<void>;
   callTransferFailed?(providerCallId: string): Promise<void>;
   callTransferClaim?(callId: string, userId: string): Promise<{ id: string; operator_id: string; bot_room: string | null; provider_call_id: string } | null>;
   /** Find (or create, without opening the 24 h window) the conversation for an outbound notification. */
@@ -66,6 +69,8 @@ export interface ServiceDeps {
   voiceToolUrl?: string;
   config(): Promise<OperatorConfig>;
   ai?: Extractor | null;
+  /** Answers free questions from the facts and the customer's memory (needs AI_API_KEY). */
+  assistant?: Assistant | null;
   now?: () => Date;
   statusTokenSecret: string;
   publicAppUrl: string;
@@ -143,6 +148,8 @@ async function handleOne(msg: InboundMessage, cfg: OperatorConfig, deps: Service
       driverRespond: (d, o, a) => deps.db.driverRespond(d, o, a),
       cancelBooking: deps.db.passengerCancel ? (phone, ref, ok) => deps.db.passengerCancel!(cfg.operatorId, phone, ref, ok, "whatsapp") : undefined,
       rate: deps.db.rate ? (phone, id, n, c) => deps.db.rate!(cfg.operatorId, phone, id, n, c) : undefined,
+      assistant: deps.assistant ?? null,
+      customerContext: deps.db.customerContext ? (phone) => deps.db.customerContext!(cfg.operatorId, phone) : undefined,
     });
     const saved = await deps.db.saveConversation(row.id, row.version, r.step, r.draft, r.locale, r.bookingId ?? null, r.needsStaff ? true : null);
     if (saved === null) continue;    // another message for this chat was processed meanwhile → redo with fresh state

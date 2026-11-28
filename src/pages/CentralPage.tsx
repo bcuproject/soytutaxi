@@ -6,7 +6,7 @@ import { Badge, Button, Logo } from "../components/ui";
 import { CallPanel, useCalls } from "../components/CallPanel";
 import { TransferCalls } from "../components/TransferCalls";
 import { WhatsAppInbox } from "../components/WhatsAppInbox";
-import { backend, CommandError, type CallMode, type DeskMethod, type DeskMode, type DispatchRow, type StaffSession, type WaCall } from "../lib/backend";
+import { backend, CommandError, type CallMode, type DeskMethod, type DeskMode, type DispatchRow, type PastCall, type StaffSession, type WaCall } from "../lib/backend";
 import { cx, fmtDateTime, fmtTime, formatMoney } from "../lib/format";
 import { LocaleContext, makeT } from "../lib/i18n";
 import BookingPage from "./BookingPage";
@@ -53,7 +53,11 @@ function Central({ session, onSignOut }: { session: StaffSession; onSignOut: () 
   const [busy, setBusy] = useState<string | null>(null);
   const [newFor, setNewFor] = useState<{ key: string; name?: string; phone?: string; callId?: string } | null>(null);
   const [chatId, setChatId] = useState<string | null>(null);
-  const [history, setHistory] = useState<{ call: WaCall; rows: DispatchRow[] } | null>(null);
+  const [history, setHistory] = useState<{ call: WaCall; rows: DispatchRow[]; calls?: PastCall[] } | null>(null);
+  const showHistory = async (c: WaCall) => {
+    const [rows, calls] = await Promise.all([backend.callerHistory(c.phone), backend.callerCalls(c.phone).catch(() => [])]);
+    setHistory({ call: c, rows, calls });
+  };
   const { calls, reload: reloadCalls } = useCalls();
 
   const load = useCallback(async () => {
@@ -154,8 +158,8 @@ function Central({ session, onSignOut }: { session: StaffSession; onSignOut: () 
       <div className="space-y-4 px-5 py-5">
         <CallPanel calls={calls} reload={reloadCalls} onNewBooking={startBooking}
           onOpenChat={(c) => { setChatId(c.conversationId); setTab("whatsapp"); }}
-          onHistory={async (c) => setHistory({ call: c, rows: await backend.callerHistory(c.phone) })} />
-        <TransferCalls calls={calls} reload={reloadCalls} onNewBooking={startBooking} />
+          onHistory={showHistory} />
+        <TransferCalls calls={calls} reload={reloadCalls} onNewBooking={startBooking} onHistory={showHistory} />
         {flash && <div className="rounded-xl bg-emerald-500/10 px-4 py-2 text-sm text-emerald-200" role="status">{flash}</div>}
         {err && <div className="rounded-xl bg-red-500/10 px-4 py-2 text-sm text-red-200" role="alert">{err}</div>}
         {history && <CallerHistory h={history} onClose={() => setHistory(null)} />}
@@ -333,7 +337,8 @@ function CallsLog({ calls, onBook, callMode, onVoice, onDone, onChat }: {
   );
 }
 
-function CallerHistory({ h, onClose }: { h: { call: WaCall; rows: DispatchRow[] }; onClose: () => void }) {
+function CallerHistory({ h, onClose }: { h: { call: WaCall; rows: DispatchRow[]; calls?: PastCall[] }; onClose: () => void }) {
+  const past = (h.calls ?? []).filter((c) => c.id !== h.call.id);
   return (
     <div className="rounded-2xl border border-ink-700 bg-ink-900 p-4">
       <div className="mb-2 flex items-center gap-2">
@@ -351,6 +356,24 @@ function CallerHistory({ h, onClose }: { h: { call: WaCall; rows: DispatchRow[] 
             </li>
           ))}
         </ul>
+      )}
+      {past.length > 0 && (
+        <div className="mt-3 border-t border-ink-800 pt-3" data-testid="past-calls">
+          <div className="mb-1 text-xs uppercase tracking-wide text-ink-400">Llamadas anteriores</div>
+          {past.map((c) => (
+            <details key={c.id} className="border-b border-ink-800 py-1.5 text-sm last:border-0">
+              <summary className="cursor-pointer">
+                <span className="tabular-nums text-ink-300">{fmtDateTime(c.startedAt)}</span>
+                {" · "}{c.handledBy === "bot" ? (c.transferred ? "Sofía → Central" : "Sofía") : "Central"}
+                {c.durationS ? ` · ${Math.max(1, Math.round(c.durationS / 60))} min` : ""}
+                {c.bookingRef && <span className="font-mono"> · {c.bookingRef}</span>}
+                {c.note && <span className="text-cab-300"> · {c.note}</span>}
+              </summary>
+              {c.transcript ? <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded-lg bg-ink-950 p-2 text-xs text-ink-300">{c.transcript}</pre>
+                : <p className="mt-1 text-xs text-ink-500">Sin transcripción.</p>}
+            </details>
+          ))}
+        </div>
       )}
     </div>
   );

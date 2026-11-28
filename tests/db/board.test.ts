@@ -204,14 +204,17 @@ describe("automatic nearest-first escalation", () => {
   });
 
   it("unclaimed board jobs switch to nearest-first once inside 12 h", async () => {
-    const b = await job("STT-DEM001", 30);
+    // Make every driver available for the next 3 days so the result doesn't depend on the time of day.
+    await q(`insert into driver_availability (operator_id, driver_id, kind, during, note)
+             select operator_id, id, 'available', tstzrange(now() - interval '1 hour', now() + interval '10 days', '[)'), 'test-window' from drivers`);
+    const b = await job("STT-DEM001", 200);       // clear of the demo trips and the other board tests, whatever the time of day
     expect((await board(0)).jobs.some((j: any) => j.bookingId === b.id)).toBe(true);
     await q("update bookings set agreed_pickup_at = now() + interval '11 hours' where id = $1", [b.id]); // time passes
     expect((await board(0)).jobs.some((j: any) => j.bookingId === b.id)).toBe(false);
     await q("select app.escalate_board()");
     const after = await booking(b.reference);
     expect(after.auto_dispatch).toBe(true);
-    expect((await q("select count(*)::int n from booking_offers where booking_id = $1 and status = 'open'", [b.id]))[0].n).toBeGreaterThan(0);
+    expect((await q("select count(*)::int n from booking_offers where booking_id = $1 and status = 'open'", [b.id]))[0].n).toBeGreaterThan(0);    await q("delete from driver_availability where note = 'test-window'");
   });
 
   it("dispatch can push a board job straight to nearest-first", async () => {

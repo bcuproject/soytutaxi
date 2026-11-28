@@ -9,7 +9,8 @@ import { computeQuote } from "../domain/quote.ts";
 import { addDaysLocal, addMinutes, utcToLocalDate } from "../domain/time.ts";
 import type { Direction, Locale, OperatorConfig, PaymentMode, VehicleOption } from "../domain/types.ts";
 import { ApiError, type CancelTerms, type Store } from "../api/store.ts";
-import type { Extractor } from "./ai.ts";
+import type { Assistant, Extractor } from "./ai.ts";
+import { customerFacts, operatorFacts, type CustomerContext } from "./facts.ts";
 import { say } from "./copy.ts";
 import type { InboundMessage, Outbound } from "./meta.ts";
 import {
@@ -77,6 +78,9 @@ export interface EngineDeps {
   /** Passenger self-service; confirm=false returns the terms only. */
   cancelBooking?(phone: string, reference: string, confirm: boolean): Promise<CancelTerms & { cancelled?: boolean }>;
   rate?(phone: string, bookingId: string, score: number, comment: string | null): Promise<{ score: number }>;
+  /** Free questions (rides, bookings, policies) answered by AI from the facts and this number's memory. */
+  assistant?: Assistant | null;
+  customerContext?(phone: string): Promise<CustomerContext | null>;
 }
 
 export interface EngineResult {
@@ -183,6 +187,19 @@ class Turn {
     if (this.msg.type === "location" && this.msg.location) return this.applyLocation();
     if (this.msg.type === "other") { this.textOut(this.t("unsupported")); return; }
 
+    // A question in the middle of a booking: answer it, then repeat the pending question.
+    if (this.deps.assistant && !["menu", "done", "handoff", "review"].includes(this.step) && looksLikeQuestion(this.text)) {
+      if ((await this.askAssistant(this.step)) === "handled") return this.next();
+    }
+
+    // Outside a booking, the assistant reads the message first (an existing ride vs. a new trip).
+    let wantsNewTrip = false;
+    if (this.deps.assistant && ["menu", "done"].includes(this.step) && !wantsMenu(this.text) && this.text.trim().length >= 3) {
+      const r = await this.askAssistant("none");
+      if (r === "handled") return;
+      wantsNewTrip = r === "book";
+    }
+
     // Free text
     const extracted = await this.understand();
     if (extracted.language && ["menu", "done"].includes(this.step) && !this.hasAnyField()) this.locale = extracted.language;
@@ -190,12 +207,43 @@ class Turn {
     const changed = this.merge(extracted);
 
     if (["menu", "done", "handoff"].includes(this.step) && !changed && !captured) {
+      if (wantsNewTrip) { this.resetDraft(); this.step = "direction"; return this.next(); }
       if (this.step === "done" && this.draft.lastRef && !wantsMenu(this.text)) return this.menu(false);
       return this.menu(true);
     }
     if (this.step === "review" && YES.test(plain)) return this.confirm();
     if (["menu", "done", "handoff"].includes(this.step)) this.step = "direction";
     return this.next();
+  }
+
+  /** Ask the AI assistant. Returns false when it couldn't help (the classic menu takes over). */
+  private async askAssistant(awaiting: string): Promise<"handled" | "book" | "none"> {
+    const memory = this.deps.customerContext ? await this.deps.customerContext(this.phone).catch(() => null) : null;
+    const r = await this.deps.assistant!.reply({
+      text: this.text, locale: this.locale, awaiting,
+      facts: operatorFacts(this.deps.cfg, this.deps.now), customer: customerFacts(memory, this.deps.cfg, this.locale),
+    });
+    if (!r) return "none";
+    if (r.language && ["menu", "done"].includes(this.step)) this.locale = r.language === "en" ? "en" : "es-AR";
+    if (awaiting !== "none") {                       // mid-booking: only answers; the flow continues
+      if (r.action === "staff") { if (r.reply) this.textOut(r.reply); this.handoff("staffOn"); return "none"; }
+      if (!r.reply) return "none";
+      this.textOut(r.reply);
+      return "handled";
+    }
+    switch (r.action) {
+      case "answer": this.textOut(r.reply); if (this.step === "menu") this.step = "done"; return "handled";
+      case "bookings": if (r.reply) this.textOut(r.reply); await this.listBookings(); return "handled";
+      case "staff": if (r.reply) this.textOut(r.reply); this.handoff("staffOn"); return "handled";
+      case "cancel":
+        if (r.reference && this.deps.cancelBooking) { if (r.reply) this.textOut(r.reply); await this.selfCancel(r.reference, "cancel"); return "handled"; }
+        if (r.reply) { this.textOut(r.reply); return "handled"; }
+        return "none";
+      case "book":
+        if (r.reply) this.textOut(r.reply);
+        return "book";                               // the guided flow takes the trip details from the same message
+    }
+    return "none";
   }
 
   private hasAnyField() { return FIELD_ORDER.some((f) => this.draft[f] !== undefined); }
@@ -705,4 +753,12 @@ class Turn {
     return new Intl.DateTimeFormat(this.locale === "en" ? "en-GB" : "es-AR", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" })
       .format(new Date(Date.UTC(y, m - 1, dd, 12)));
   }
+}
+
+/** "¿Cuántas valijas entran?", "do you have child seats", "donde me espera el chofer" … */
+export function looksLikeQuestion(text: string) {
+  const t = text.trim().toLowerCase();
+  if (/[?¿]/.test(t)) return true;
+  return /^(como|cómo|cuanto|cuánto|cuanta|cuánta|cuantos|cuántos|donde|dónde|cuando|cuándo|puedo|pueden|aceptan|tienen|hay|incluye|es posible|se puede|how|what|where|when|can i|can you|do you|does|is it|is there|are there|will)\b/.test(t)
+    && t.split(/\s+/).length >= 3;
 }

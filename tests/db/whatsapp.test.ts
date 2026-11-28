@@ -40,6 +40,8 @@ const waDb: WaDb = {
   bookingsForPhone: (op, phone) => rpc("wa_bookings_for_phone", { p_operator: op, p_phone: phone }),
   driverRespond: (d, o, a) => rpc("wa_driver_respond", { p_driver: d, p_offer: o, p_accept: a }),
   callTransferRequest: (id, reason) => rpc("wa_call_transfer_request", { p_call_id: id, p_reason: reason }),
+  customerContext: (op, phone) => rpc("wa_customer_context", { p_operator: op, p_phone: phone }),
+  callTranscript: (id, t) => rpc("wa_call_transcript", { p_call_id: id, p_transcript: t }),
   callTransferFailed: (id) => rpc("wa_call_transfer_failed", { p_call_id: id }),
   passengerCancel: (op, phone, ref, ok, via) => rpc("wa_passenger_cancel", { p_operator: op, p_phone: phone, p_reference: ref, p_confirm: ok, p_via: via }),
   rate: (op, phone, id, n, c) => rpc("wa_rate", { p_operator: op, p_phone: phone, p_booking: id, p_score: n, p_comment: c }),
@@ -303,6 +305,7 @@ describe("Voice bot (database)", () => {
       note: (id, n, cb) => waDb.callNote(id, n, cb),
       transfer: (id, r) => waDb.callTransferRequest!(id, r), transferFailed: (id) => waDb.callTransferFailed!(id),
       cancel: (phone, ref, ok) => waDb.passengerCancel!(DEMO_OPERATOR_ID, phone, ref, ok, "voice"),
+      customerContext: (phone) => waDb.customerContext!(DEMO_OPERATOR_ID, phone), saveTranscript: (id, t) => waDb.callTranscript!(id, t),
       sendWhatsApp: async (c, m) => { sent.push({ to: c.waId, m }); return true; },
     }, { callId: "wacid.V1", token: await voiceToken("voice-secret", "wacid.V1"), action, args, ...extra });
   });
@@ -365,6 +368,18 @@ describe("Voice bot (database)", () => {
     await tool("transfer_failed");
     expect((await q("select wants_callback, transfer_failed_at is not null f from wa_calls where provider_call_id = 'wacid.V1'"))[0]).toEqual({ wants_callback: true, f: true });
     await q("update wa_calls set wants_callback = false, bot_note = null where provider_call_id = 'wacid.V1'");
+
+    // Memory: the transcript is saved, and the next call (and the WhatsApp assistant) sees calls, chat and bookings.
+    await tool("transcript", { transcript: "Sofía: ¡Hola!\nCliente: Quiero saber si hay silla de bebé" });
+    const phone = (await q("select phone_e164 from wa_calls where provider_call_id = 'wacid.V1'"))[0].phone_e164;
+    const mem = await waDb.customerContext!(DEMO_OPERATOR_ID, phone);
+    expect(mem!.calls.at(-1)).toMatchObject({ handledBy: "Sofía (bot)", transcript: expect.stringContaining("silla de bebé") });
+    expect(mem!.bookings.map((b) => b.reference)).toContain(booked.body.reference);
+    expect(mem!.bookings.find((b) => b.reference === booked.body.reference)!.driver).toBeNull();   // no driver accepted yet
+    const again = await tool("config");
+    expect(again.body.customer.previousCalls.at(-1).transcriptEnd).toContain("silla de bebé");
+    expect(again.body.customer.bookings[0]).toHaveProperty("status");
+    expect((await waDb.customerContext!(DEMO_OPERATOR_ID, "+0000000000"))!.bookings).toEqual([]);   // other numbers see nothing
     await tool("note", { note: "Quiere saber si hay sillita para bebé", callback: true });
     expect((await q("select wants_callback, bot_note from wa_calls where provider_call_id = 'wacid.V1'"))[0]).toEqual({ wants_callback: true, bot_note: "Quiere saber si hay sillita para bebé" });
   });

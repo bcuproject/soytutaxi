@@ -6,11 +6,12 @@
 import { canonicalJson, deriveStatusToken, hmacBase64Url, sessionHash, sha256Hex } from "../domain/crypto.ts";
 import { formatMoney } from "../domain/fare.ts";
 import { computeQuote } from "../domain/quote.ts";
-import { addMinutes, utcToLocalDate } from "../domain/time.ts";
+import { addMinutes } from "../domain/time.ts";
 import type { Direction, Locale, OperatorConfig, PaymentMode } from "../domain/types.ts";
 import { ApiError, type CancelTerms, type Store } from "../api/store.ts";
 import type { BookingSummary } from "./engine.ts";
 import type { Outbound } from "./meta.ts";
+import { customerFacts, operatorFacts, type CustomerContext } from "./facts.ts";
 
 // ------------------------------------------------------------------------------------------ tokens
 export const voiceToken = (secret: string, providerCallId: string) => hmacBase64Url(secret, `voice:${providerCallId}`);
@@ -101,6 +102,9 @@ export interface VoiceDeps {
   cancel?(phone: string, reference: string, confirm: boolean): Promise<CancelTerms & { cancelled?: boolean }>;
   /** Ask the Central for a person (a desk agent joins the LiveKit room). */
   transfer?(providerCallId: string, reason: string): Promise<{ ok: boolean }>;
+  /** Memory: what we know about this number (bookings, WhatsApp, previous calls), and saving this call's transcript. */
+  customerContext?(phone: string): Promise<CustomerContext | null>;
+  saveTranscript?(providerCallId: string, transcript: string): Promise<void>;
   transferFailed?(providerCallId: string): Promise<void>;
   /** WhatsApp message to the caller (within the 24 h window the call opened). */
   sendWhatsApp(call: VoiceCall, m: Outbound): Promise<boolean>;
@@ -161,24 +165,19 @@ export async function voiceTool(deps: VoiceDeps, input: Record<string, unknown>)
   switch (String(input.action)) {
     case "config": {
       const bookings = await deps.bookingsForPhone(call.phone);
+      const memory = deps.customerContext ? await deps.customerContext(call.phone).catch(() => null) : null;
       return { status: 200, body: {
-        operator: cfg.name, demo: cfg.demoMode || cfg.policy.isDemo,
-        now: when(deps.now.toISOString(), cfg.timezone, "es-AR"), today: utcToLocalDate(deps.now, cfg.timezone),
+        ...operatorFacts(cfg, deps.now),
         callerName: call.name, callerPhoneLast4: call.phone.slice(-4),
-        airports: cfg.airports.filter((a) => a.active).map((a) => ({ code: a.iata, name: a.name, meetingPointEs: a.meetingPointEs, meetingPointEn: a.meetingPointEn })),
-        zones: cfg.zones.filter((z) => z.active).map((z) => ({ code: z.code, name: z.name })),
-        vehicles: cfg.vehicleClasses.filter((v) => v.active).map((v) => ({ code: v.code, es: v.labelEs, en: v.labelEn,
-          maxPassengers: v.maxPassengers, maxLargeBags: v.maxLargeBags, maxCarryOn: v.maxCarryOn })),
-        rules: {
-          leadTimeHours: Math.round(pc.lead_time_minutes / 60), maxAdvanceDays: pc.max_advance_days,
-          freeCancellationHoursBefore: pc.cancellation.free_until_hours_before, refundPercentAfter: pc.cancellation.refund_percent_after,
-          freeWaitAirportMinutes: pc.waiting.free_wait_minutes_airport, freeWaitCityMinutes: pc.waiting.free_wait_minutes_city,
-          arrivalPickupBufferMinutes: pc.arrival_buffer_minutes, paymentModes: pc.allowed_payment_modes,
-          flightTracked: true,
-        },
         upcomingBookings: bookings.map((b) => ({ reference: b.reference, spoken: spellReference(b.reference), state: b.state,
           pickup: when(b.pickupAt, cfg.timezone, "es-AR"), route: b.direction === "from_airport" ? `${b.airport} → ${b.zone ?? ""}` : `${b.zone ?? ""} → ${b.airport}` })),
+        customer: customerFacts(memory, cfg, "es-AR"),
       } };
+    }
+
+    case "transcript": {
+      await deps.saveTranscript?.(callId, str(args.transcript, 8000));
+      return { status: 200, body: { ok: true } };
     }
 
     case "quote": {

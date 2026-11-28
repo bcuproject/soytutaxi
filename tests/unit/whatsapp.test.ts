@@ -335,3 +335,100 @@ describe("Reminder and rating notifications", () => {
     expect(rt.send && rt.message.type === "list" && rt.message.rows.map((x) => x.id)).toEqual([5, 4, 3, 2, 1].map((n) => `rate:${ctx.bookingId}:${n}`));
   });
 });
+
+describe("WhatsApp assistant — free questions with the customer's memory", () => {
+  const memory = {
+    name: "Emma Wilson",
+    bookings: [{ reference: "STT-AB12CD", state: "confirmed", direction: "from_airport" as const, airport: "EZE", zone: "Palermo",
+      pickupPlace: null, dropoffPlace: "Hotel Palermo", pickupAt: "2026-11-28T15:00:00Z", proposedPickupAt: null,
+      flight: "AR1303", flightStatus: "Delayed", flightEstimatedArrivalAt: "2026-11-28T15:40:00Z",
+      passengers: 2, largeBags: 2, carryOn: 1, vehicleClass: "sedan_premium", amountMinor: 5000000, currency: "ARS",
+      paymentMode: "pay_on_pickup_cash", paid: false, cancelledReason: null,
+      driver: { firstName: "Carlos", vehicle: "Toyota Corolla", plate: "AB123CD", stage: "en_route" }, rating: null }],
+    messages: [{ at: "2026-11-27T20:00:00Z", from: "customer" as const, text: "¿Tienen silla de bebé?" }],
+    calls: [{ at: "2026-11-27T21:00:00Z", status: "ended", durationS: 180, handledBy: "Sofía (bot)", transferred: false,
+      note: "Pide silla de bebé", callbackPending: true, booking: "STT-AB12CD", transcript: "Cliente: ¿tienen silla de bebé?" }],
+  };
+  let seen: { text: string; awaiting: string; customer: any; facts: any }[];
+  const assistant = (r: Awaited<ReturnType<NonNullable<EngineDeps["assistant"]>["reply"]>>) => ({
+    async reply(i: any) { seen.push(i); return r; },
+  });
+  beforeEach(() => { seen = []; deps.customerContext = async () => memory; });
+
+  it("answers a ride question from the memory (driver, car, flight) in local time", async () => {
+    deps.assistant = assistant({ action: "answer", reply: "Tu chofer es Carlos, en un Toyota Corolla AB123CD, y ya está en camino 🚗" });
+    expect(all(await send("quien me viene a buscar y en que auto"))).toMatch(/Carlos.*AB123CD/);
+    const c = seen[0].customer;
+    expect(c.bookings[0]).toMatchObject({ reference: "STT-AB12CD", status: "confirmada", driver: { name: "Carlos", plate: "AB123CD", status: "en camino" } });
+    expect(c.bookings[0].flight.estimatedArrival).toMatch(/12:40/);          // 15:40 UTC → 12:40 Buenos Aires
+    expect(c.previousCalls[0]).toMatchObject({ note: "Pide silla de bebé", callbackPending: true });
+    expect(c.recentWhatsApp[0]).toMatch(/silla de bebé/);
+    expect(seen[0].facts.rules.freeCancellationHoursBefore).toBeDefined();
+    expect(seen[0].awaiting).toBe("none");
+  });
+
+  it("routes intents to the safe flows: cancel → terms buttons, staff → hand-off, book → guided booking, bookings → list", async () => {
+    deps.cancelBooking = async () => ({ allowed: true, reason: null, refundPercent: 100, freeUntilHoursBefore: 24, freeUntil: NOW.toISOString(),
+      paidMinor: 0, refundMinor: 0, currency: "ARS", reference: "STT-AB12CD", pickupAt: "2026-11-29T15:00:00Z", paymentMode: "pay_on_pickup_cash" });
+    deps.assistant = assistant({ action: "cancel", reply: "", reference: "STT-AB12CD" });
+    expect(ids(await send("necesito cancelar el viaje de mañana"))).toEqual(["bk:cancelok:STT-AB12CD", "bk:keep:STT-AB12CD"]);
+
+    deps.assistant = assistant({ action: "staff", reply: "Te paso con una persona para cambiar la hora." });
+    await send("quiero cambiar la hora del viaje");
+    expect(last().needsStaff).toBe(true);
+    expect(conv.step).toBe("handoff");
+
+    conv = { ...conv, step: "done", draft: {} };
+    deps.assistant = assistant({ action: "book", reply: "¡Dale! Armemos tu viaje." });
+    const r = await send("me cotizan un viaje");
+    expect(all(r)).toContain("Armemos tu viaje");
+    expect(ids(r)).toContain("dir:from_airport");
+  });
+
+  it("a new trip written in one message keeps its details after the AI routes it", async () => {
+    deps.assistant = assistant({ action: "book", reply: "" });
+    await send("necesito un taxi desde ezeiza a palermo, somos 2");
+    expect(conv.draft).toMatchObject({ direction: "from_airport", airport: "EZE", zoneCode: "palermo", passengers: 2 });
+  });
+
+  it("answers a question in the middle of a booking and repeats the pending question", async () => {
+    deps.assistant = assistant({ action: "answer", reply: "Sí, en el sedán entran 3 valijas grandes." });
+    await send({ reply: "menu:book" });
+    await send({ reply: "dir:from_airport" });
+    const r = await send("¿cuántas valijas entran en el auto?");
+    expect(all(r)).toContain("entran 3 valijas");
+    expect(ids(r)).toEqual(["ap:EZE", "ap:AEP"]);                     // same question again
+    expect(seen[0].awaiting).toBe("airport");
+    expect(conv.draft.direction).toBe("from_airport");               // nothing lost
+  });
+
+  it("falls back to the menu when the AI can't help; greetings still show the menu", async () => {
+    deps.assistant = assistant(null);
+    expect(ids(await send("bla bla bla"))).toContain("menu:book");
+    deps.assistant = assistant({ action: "answer", reply: "x" });
+    expect(ids(await send("hola"))).toContain("menu:book");
+    expect(seen.length).toBe(1);                                        // "hola" never reached the AI
+  });
+
+  it("parses the model's JSON safely", async () => {
+    const { makeAssistant, assistantPrompt } = await import("@shared/whatsapp/ai.ts");
+    const fake = (content: string) => (async () => new Response(JSON.stringify({ choices: [{ message: { content } }] }))) as unknown as typeof fetch;
+    const input = { text: "hola", locale: "es-AR" as const, awaiting: "none", facts: { operator: "X" }, customer: { name: "Emma" } };
+    expect(await makeAssistant({ apiKey: "k" }, fake('{"action":"cancel","reply":"ok","reference":"stt-ab12cd","language":"es"}')).reply(input))
+      .toEqual({ action: "cancel", reply: "ok", reference: "STT-AB12CD", language: "es" });
+    expect(await makeAssistant({ apiKey: "k" }, fake('{"action":"delete_everything","reply":"x"}')).reply(input)).toBeNull();
+    expect(await makeAssistant({ apiKey: "k" }, fake("not json")).reply(input)).toBeNull();
+    expect(await makeAssistant({ apiKey: "k" }, fake('{"action":"answer","reply":""}')).reply(input)).toBeNull();
+    expect(assistantPrompt(input)).toContain('"name":"Emma"');
+    expect(assistantPrompt({ ...input, awaiting: "passengers" })).toContain("waiting for: passengers");
+  });
+
+  it("recognises questions", async () => {
+    const { looksLikeQuestion } = await import("@shared/whatsapp/engine.ts");
+    expect(looksLikeQuestion("¿aceptan tarjeta?")).toBe(true);
+    expect(looksLikeQuestion("donde me espera el chofer")).toBe(true);
+    expect(looksLikeQuestion("do you have child seats")).toBe(true);
+    expect(looksLikeQuestion("Av. Corrientes 1234")).toBe(false);
+    expect(looksLikeQuestion("3")).toBe(false);
+  });
+});

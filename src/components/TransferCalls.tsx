@@ -11,7 +11,7 @@ const ERR: Record<string, string> = {
   live_only: "En el modo demo no hay audio real: en vivo acá hablarías con el cliente.", forbidden: "Tu usuario no puede atender llamadas.",
 };
 
-export function TransferCalls({ calls, reload, onNewBooking }: { calls: WaCall[]; reload: () => void; onNewBooking: (c: WaCall) => void }) {
+export function TransferCalls({ calls, reload, onNewBooking, onHistory }: { calls: WaCall[]; reload: () => void; onNewBooking: (c: WaCall) => void; onHistory?: (c: WaCall) => void }) {
   const waiting = calls.filter((c) => c.handledBy === "bot" && c.transferRequestedAt && !c.transferTakenAt && !c.transferFailedAt
     && !["ended", "missed", "rejected", "failed"].includes(c.status) && Date.now() - new Date(c.transferRequestedAt).getTime() < 60_000);
   const [live, setLive] = useState<{ call: WaCall; room: Room } | null>(null);
@@ -49,6 +49,7 @@ export function TransferCalls({ calls, reload, onNewBooking }: { calls: WaCall[]
           <div><div className="font-semibold text-white">En llamada (transferida por Sofía) · {live.call.name || live.call.phone}</div>
             <div className="text-xs text-emerald-200/80">{live.call.phone}{live.call.transferReason && ` · ${live.call.transferReason}`}</div></div>
           <div className="ml-auto flex gap-2">
+            {onHistory && <Button variant="outline" className="py-1.5 text-sm" onClick={() => onHistory(live.call)}>📋 Historial</Button>}
             <Button className="py-1.5 text-sm" onClick={() => onNewBooking(live.call)}>+ Reserva para este cliente</Button>
             <Button variant="outline" className="py-1.5 text-sm" onClick={async () => { await live.room.localParticipant.setMicrophoneEnabled(muted); setMuted(!muted); }}>{muted ? "🎙️ Activar mic" : "🔇 Silenciar"}</Button>
             <button onClick={() => hang(live.room)} className="rounded-xl bg-red-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-red-500">Colgar</button>
@@ -60,7 +61,8 @@ export function TransferCalls({ calls, reload, onNewBooking }: { calls: WaCall[]
           <span className="text-2xl" aria-hidden>🤖→👤</span>
           <div><div className="font-semibold text-white">Sofía te pasa una llamada · {c.name || c.phone}</div>
             <div className="text-xs text-cab-200/80">{c.transferReason ?? "Pidió hablar con una persona"} · el cliente espera en línea</div></div>
-          <Button className="ml-auto py-1.5" onClick={() => take(c)}>Atender</Button>
+          {onHistory && <Button variant="ghost" className="ml-auto py-1.5" onClick={() => onHistory(c)}>📋 Historial</Button>}
+          <Button className={onHistory ? "py-1.5" : "ml-auto py-1.5"} onClick={() => take(c)}>Atender</Button>
         </div>
       ))}
       {err && <p className="rounded-xl bg-red-500/10 px-4 py-2 text-sm text-red-200" role="alert">{err}</p>}

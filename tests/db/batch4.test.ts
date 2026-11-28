@@ -122,3 +122,27 @@ describe("Live transfer from Sofía", () => {
     expect(await code(as(DISPATCHER, "select wa_call_transfer_claim($1, $2) as r", [t2.id, DISPATCHER]))).toMatch(/permission denied/);
   });
 });
+
+describe("Customer memory", () => {
+  it("shows the driver (first name, car, plate, stage) only once accepted, plus chat and calls; nothing for other numbers", async () => {
+    const ctx = async (phone: string) => (await q("select wa_customer_context($1, $2) as r", [OP, phone]))[0].r;
+    const b = await booking("STT-DEM004");          // needs a driver
+    const phone = (await q("select phone_e164 from passengers where id = $1", [b.passenger_id]))[0].phone_e164;
+    expect((await ctx(phone)).bookings.find((x: any) => x.reference === "STT-DEM004").driver).toBeNull();
+
+    const conf = await booking("STT-DEM002");
+    const p2 = (await q("select phone_e164 from passengers where id = $1", [conf.passenger_id]))[0].phone_e164;
+    const conv = (await q(`insert into wa_conversations (operator_id, wa_id, phone_e164) values ($1, $2, $3) returning id`, [OP, p2.slice(1), p2]))[0].id;
+    await q(`insert into wa_messages (operator_id, conversation_id, direction, kind, preview) values ($1, $2, 'in', 'text', '¿Dónde me espera el chofer?')`, [OP, conv]);
+    await q(`insert into wa_calls (operator_id, provider_call_id, wa_id, phone_e164, status, handled_by, transcript, bot_note)
+             values ($1, 'wacid.M1', $2, $3, 'ended', 'bot', 'Cliente: llego con 4 valijas', 'Trae 4 valijas')`, [OP, p2.slice(1), p2]);
+    const m = await ctx(p2);
+    const d = m.bookings.find((x: any) => x.reference === "STT-DEM002").driver;
+    expect(d).toMatchObject({ firstName: expect.any(String), plate: expect.any(String) });
+    expect(d).not.toHaveProperty("phone");
+    expect(m.messages.at(-1)).toMatchObject({ from: "customer", text: "¿Dónde me espera el chofer?" });
+    expect(m.calls.at(-1)).toMatchObject({ note: "Trae 4 valijas", transcript: "Cliente: llego con 4 valijas" });
+    const other = await ctx("+5491100009999");
+    expect(other).toMatchObject({ bookings: [], messages: [], calls: [] });
+  });
+});

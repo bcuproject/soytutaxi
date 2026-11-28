@@ -155,6 +155,33 @@ class Session(unittest.IsolatedAsyncioTestCase):
         self.assertIn("transfer_failed", posts)
         self.assertTrue(state["replies"] and "WhatsApp" in state["replies"][0])
 
+    def test_memory_in_greeting_and_prompt(self):
+        facts = dict(FACTS, customer={"previousCalls": [{"when": "viernes 27 de noviembre, 18:10", "note": "Pregunta por silla de bebé"}],
+                                      "bookings": [{"reference": "STT-AB12CD", "driver": {"name": "Carlos", "plate": "AB123CD"}}]})
+        self.assertTrue(stt.greeting(facts).startswith("¡Hola de nuevo"))
+        p = stt.build_prompt(facts)
+        self.assertIn("silla de bebé", p)
+        self.assertIn("AB123CD", p)
+        self.assertFalse(stt.greeting(FACTS).startswith("¡Hola de nuevo"))
+
+    async def test_transcript_is_saved_at_the_end(self):
+        item = lambda role, text: SimpleNamespace(type="message", role=role, text_content=text)
+        session = SimpleNamespace(history=SimpleNamespace(items=[
+            item("system", "x"), item("assistant", "¡Hola! Soy Sofía."), item("user", "Quiero cancelar mi viaje"),
+            SimpleNamespace(type="function_call"), item("assistant", "Listo, quedó cancelada.")]))
+        self.assertEqual(stt.transcript_text(session), "Sofía: ¡Hola! Soy Sofía.\nCliente: Quiero cancelar mi viaje\nSofía: Listo, quedó cancelada.")
+        posted = []
+
+        class T:
+            async def post(self, action, args=None, language="es"):
+                posted.append((action, args))
+                return {"ok": True}
+
+        await stt.save_transcript(session, T())
+        self.assertEqual(posted[0][0], "transcript")
+        await stt.save_transcript(SimpleNamespace(), T())     # no history → nothing posted, no error
+        self.assertEqual(len(posted), 1)
+
     async def test_missing_config_aborts_before_answering(self):
         caller = SimpleNamespace(identity="c", attributes=ATTRS)
         with patch.object(stt.Tools, "post", AsyncMock(return_value={"ok": False})):

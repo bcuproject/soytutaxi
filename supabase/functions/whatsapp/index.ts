@@ -14,7 +14,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { ApiError } from "../_shared/api/store.ts";
 import { SupabaseStore } from "../_shared/api/supabaseStore.ts";
-import { makeExtractor } from "../_shared/whatsapp/ai.ts";
+import { makeAssistant, makeExtractor } from "../_shared/whatsapp/ai.ts";
 import { graphCalls, graphSender, parseWebhook, verifySignature } from "../_shared/whatsapp/meta.ts";
 import type { NotificationContext, TemplateMap } from "../_shared/whatsapp/notify.ts";
 import { liveKitVoiceBot, voiceTool, type VoiceCall } from "../_shared/whatsapp/voice.ts";
@@ -72,6 +72,8 @@ const waDb: WaDb = {
   inboxDone: (key) => rpc("wa_inbox_done", { p_event_key: key }),
   bookingsForPhone: (op, phone) => rpc("wa_bookings_for_phone", { p_operator: op, p_phone: phone }),
   driverRespond: (d, o, a) => rpc("wa_driver_respond", { p_driver: d, p_offer: o, p_accept: a }),
+  customerContext: (op, phone) => rpc("wa_customer_context", { p_operator: op, p_phone: phone }),
+  callTranscript: (id, t) => rpc("wa_call_transcript", { p_call_id: id, p_transcript: t }),
   callTransferRequest: (id, reason) => rpc("wa_call_transfer_request", { p_call_id: id, p_reason: reason }),
   callTransferFailed: (id) => rpc("wa_call_transfer_failed", { p_call_id: id }),
   async callTransferClaim(id, user) {
@@ -125,8 +127,12 @@ const ai = env("AI_API_KEY")
   ? makeExtractor({ apiKey: env("AI_API_KEY"), baseUrl: env("AI_BASE_URL") || undefined, model: env("AI_MODEL") || undefined })
   : null;
 
+const assistant = env("AI_API_KEY")
+  ? makeAssistant({ apiKey: env("AI_API_KEY"), baseUrl: env("AI_BASE_URL") || undefined, model: env("AI_MODEL") || undefined })
+  : null;
+
 const deps: ServiceDeps = {
-  db: waDb, store, sender, ai, log, templates, statusTokenSecret: STATUS_SECRET, publicAppUrl: PUBLIC_APP_URL,
+  db: waDb, store, sender, ai, assistant, log, templates, statusTokenSecret: STATUS_SECRET, publicAppUrl: PUBLIC_APP_URL,
   calls: configured() ? graphCalls(env("WHATSAPP_PHONE_NUMBER_ID"), env("WHATSAPP_ACCESS_TOKEN")) : undefined,
   voiceBot: configured() && env("LIVEKIT_URL") && env("LIVEKIT_API_KEY") && env("LIVEKIT_API_SECRET")
     ? liveKitVoiceBot({ url: env("LIVEKIT_URL"), apiKey: env("LIVEKIT_API_KEY"), apiSecret: env("LIVEKIT_API_SECRET"),
@@ -181,6 +187,8 @@ Deno.serve(async (req) => {
       cancel: (phone, ref, ok) => waDb.passengerCancel!(cfg.operatorId, phone, ref, ok, "voice"),
       transfer: (id, reason) => waDb.callTransferRequest!(id, reason),
       transferFailed: (id) => waDb.callTransferFailed!(id),
+      customerContext: (phone) => waDb.customerContext!(cfg.operatorId, phone),
+      saveTranscript: (id, t) => waDb.callTranscript!(id, t),
       async sendWhatsApp(call: VoiceCall, m) {
         if (!configured() || !call.conversationId) return false;
         const sent = await sendAndRecord(deps, call.conversationId, call.waId, m);
