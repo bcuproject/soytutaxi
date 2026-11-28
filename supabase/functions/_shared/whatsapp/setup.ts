@@ -112,9 +112,25 @@ export async function runSetup(action: SetupAction, args: Record<string, unknown
         } catch { appWebhook = null; }
       }
       const me = await g("GET", "me?fields=id,name");
+      // Discovery (read-only): which WhatsApp accounts this system user and its business can actually reach.
+      const discovered: Record<string, unknown> = {};
+      if (me.ok && me.data?.id) {
+        const a = await g("GET", `${me.data.id}/assigned_whatsapp_business_accounts?fields=id,name`);
+        discovered.assigned = a.ok ? a.data?.data ?? [] : metaError(a.data);
+        const b = await g("GET", `${me.data.id}/businesses?fields=id,name`);
+        const biz = b.ok ? (b.data?.data ?? []).slice(0, 3) : [];
+        if (!b.ok) discovered.businessesError = metaError(b.data);
+        discovered.businesses = [];
+        for (const x of biz) {
+          const o = await g("GET", `${x.id}/owned_whatsapp_business_accounts?fields=id,name`);
+          const c = await g("GET", `${x.id}/client_whatsapp_business_accounts?fields=id,name`);
+          (discovered.businesses as unknown[]).push({ id: x.id, name: x.name,
+            owned: o.ok ? o.data?.data ?? [] : metaError(o.data), client: c.ok ? c.data?.data ?? [] : metaError(c.data) });
+        }
+      }
       return { ok: true, status: 200, body: {
         appWebhook,
-        tokenOwner: me.ok ? me.data : metaError(me.data),
+        tokenOwner: me.ok ? me.data : metaError(me.data), discovered,
         tokenScopes: scopes.map((s) => ({ scope: s.scope, targets: s.target_ids ?? null })),
         tokenValid: !!dbg.data?.data?.is_valid, appId: dbg.data?.data?.app_id ?? null, expiresAt: dbg.data?.data?.expires_at ?? null,
         permissions, accounts, selected: { wabaId: waba || null, phoneNumberId: phone || null }, calling,
