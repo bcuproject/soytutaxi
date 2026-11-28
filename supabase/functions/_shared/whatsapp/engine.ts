@@ -184,6 +184,9 @@ class Turn {
 
     // Global commands
     if (this.id === "menu:staff" || this.id === "review:staff" || (this.text && wantsStaff(this.text))) return this.handoff("staffOn");
+    if (!this.id && this.text && wantsCancel(this.text) && this.step === "done" && this.draft.lastRef && this.deps.cancelBooking) {
+      return this.selfCancel(this.draft.lastRef, "cancel");
+    }
     if (this.id === "change:cancel" || (this.text && wantsCancel(this.text))) {
       this.resetDraft();
       this.textOut(this.t("cancelled"));
@@ -749,7 +752,10 @@ class Turn {
         actorId: null, flightExceptionReason: null, requestId: `wa-${this.msg.id}`,
       });
       const url = this.statusUrl(r.reference, token);
-      this.textOut(this.t("booked", { ref: r.reference, url }));
+      // Right after booking: one tap to cancel (shows the policy and asks to confirm first) or to see the booking.
+      this.replies.push({ type: "buttons", text: this.t("booked", { ref: r.reference, url }),
+        footer: this.t("bookedFooter"),
+        buttons: [{ id: `bk:cancel:${r.reference}`, title: this.t("btnCancelBooking") }, { id: "menu:check", title: this.t("menuCheck") }] });
       this.bookingId = r.bookingId;
       this.draft = { name: d.name, lastRef: r.reference, lastUrl: url };
       this.step = "done";

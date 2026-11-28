@@ -1636,6 +1636,7 @@ var es = {
   staffOn: "Listo, una persona del equipo te responde por ac\xE1 en breve \u{1F64C}",
   staffWait: "Ya avisamos al equipo; en breve te responde una persona.",
   cancelled: "Listo, empezamos de nuevo.",
+  bookedFooter: "Para cancelar, toc\xE1 el bot\xF3n o escrib\xED *cancelar*.",
   noBookings: "No encontr\xE9 reservas activas con este n\xFAmero.",
   bookingsHeader: "Tus reservas:",
   bookingLine: "\u2022 *{ref}* \u2014 {when} \u2014 {route} \u2014 {state}\n  {url}",
@@ -1670,6 +1671,7 @@ var es = {
   rateCommentThanks: "Gracias por contarnos. Alguien del equipo lo va a revisar y, si hace falta, te escribe.",
   rateError: "No pude guardar la calificaci\xF3n ({reason}).",
   btnCancelRef: "\u274C Cancelar {ref}",
+  btnCancelBooking: "\u274C Cancelar reserva",
   cancelAsk: "\xBFQuer\xE9s cancelar la reserva *{ref}* ({when})?\n\n{refund}",
   cancelFree: "Es sin cargo.",
   cancelRefundFull: "Te devolvemos el total pagado ({amount}).",
@@ -1774,6 +1776,7 @@ Or tap a button (or type *1* book \xB7 *2* my booking \xB7 *3* talk to a person)
   staffOn: "OK \u2014 someone from the team will reply here shortly \u{1F64C}",
   staffWait: "The team has been notified; a person will reply shortly.",
   cancelled: "OK, let's start again.",
+  bookedFooter: "To cancel, tap the button or type *cancel*.",
   noBookings: "I couldn't find active bookings for this number.",
   bookingsHeader: "Your bookings:",
   bookingLine: "\u2022 *{ref}* \u2014 {when} \u2014 {route} \u2014 {state}\n  {url}",
@@ -1808,6 +1811,7 @@ Or tap a button (or type *1* book \xB7 *2* my booking \xB7 *3* talk to a person)
   rateCommentThanks: "Thanks for telling us. Someone on the team will review it and get back to you if needed.",
   rateError: "I couldn't save the rating ({reason}).",
   btnCancelRef: "\u274C Cancel {ref}",
+  btnCancelBooking: "\u274C Cancel booking",
   cancelAsk: "Do you want to cancel booking *{ref}* ({when})?\n\n{refund}",
   cancelFree: "There's no charge.",
   cancelRefundFull: "We'll refund the full amount paid ({amount}).",
@@ -2123,6 +2127,9 @@ var Turn = class {
     const cm = /^bk:(cancel|cancelok|keep):([A-Z0-9-]{4,20})$/.exec(this.id);
     if (cm && this.deps.cancelBooking) return this.selfCancel(cm[2], cm[1]);
     if (this.id === "menu:staff" || this.id === "review:staff" || this.text && wantsStaff(this.text)) return this.handoff("staffOn");
+    if (!this.id && this.text && wantsCancel(this.text) && this.step === "done" && this.draft.lastRef && this.deps.cancelBooking) {
+      return this.selfCancel(this.draft.lastRef, "cancel");
+    }
     if (this.id === "change:cancel" || this.text && wantsCancel(this.text)) {
       this.resetDraft();
       this.textOut(this.t("cancelled"));
@@ -2881,7 +2888,12 @@ _${this.t("payNote")}_`,
         requestId: `wa-${this.msg.id}`
       });
       const url = this.statusUrl(r.reference, token);
-      this.textOut(this.t("booked", { ref: r.reference, url }));
+      this.replies.push({
+        type: "buttons",
+        text: this.t("booked", { ref: r.reference, url }),
+        footer: this.t("bookedFooter"),
+        buttons: [{ id: `bk:cancel:${r.reference}`, title: this.t("btnCancelBooking") }, { id: "menu:check", title: this.t("menuCheck") }]
+      });
       this.bookingId = r.bookingId;
       this.draft = { name: d.name, lastRef: r.reference, lastUrl: url };
       this.step = "done";

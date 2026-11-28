@@ -86,6 +86,12 @@ describe("WhatsApp booking — guided buttons", () => {
     expect(done).toMatch(/Recibimos tu solicitud STT-[A-Z0-9]{6}/);
     expect(conv.step).toBe("done");
     expect([...store.bookings.values()].at(-1)).toMatchObject({ paymentMode: "prepaid", contact: { name: "nicolas" } });
+    // Cancel right after booking: a button on the confirmation, and typing "cancelar" both ask to confirm first.
+    const ref = /STT-[A-Z0-9]{6}/.exec(done)![0];
+    expect(ids(last().replies)).toEqual([`bk:cancel:${ref}`, "menu:check"]);
+    deps.cancelBooking = async () => ({ allowed: true, cancelled: false, reason: null, refundPercent: 100, freeUntilHoursBefore: 24, freeUntil: NOW.toISOString(),
+      paidMinor: 0, refundMinor: 0, currency: "USD", paymentMode: "prepaid", pickupAt: NOW.toISOString() }) as never;
+    expect(ids(await send("cancelar"))).toEqual([`bk:cancelok:${ref}`, `bk:keep:${ref}`]);
   });
 
   it("typed 'quiero hacer una reserva' or '1' at the menu starts the booking", async () => {
