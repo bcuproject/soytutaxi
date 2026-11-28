@@ -105,3 +105,24 @@ describe("WhatsApp setup — app webhook fields (read-only)", () => {
     expect(JSON.stringify(r.body)).not.toContain("app-secret-xyz");
   });
 });
+
+describe("templates match what the notifier sends", () => {
+  it("every template has as many {{n}} as the notifier's params, and the offer has Accept/Decline buttons", async () => {
+    const { TEMPLATES } = await import("@shared/whatsapp/setup.ts");
+    // params per kind, as built in notify.ts
+    const expected: Record<string, number> = {
+      "notify.passenger.confirmed": 5, "notify.passenger.cancelled": 1, "notify.passenger.payment_due": 4,
+      "notify.passenger.pickup_changed": 3, "notify.passenger.reminder": 3, "notify.passenger.rating": 1,
+      "notify.passenger.refund": 1, "notify.driver.offer": 3, "notify.driver.assigned": 2,
+      "notify.driver.pickup_changed": 2, "notify.driver.released": 2,
+    };
+    for (const t of TEMPLATES) {
+      const n = new Set(t.body.match(/\{\{\d+\}\}/g)).size;
+      expect(n, t.name).toBe(expected[t.kind]);
+      expect(t.example.length, t.name).toBe(n);
+      expect(/^\{\{|\}\}[.!]?$/.test(t.body.trim()), `${t.name} must not start/end with a variable`).toBe(false);
+      for (const b of t.buttons ?? []) expect(b.length).toBeLessThanOrEqual(25);
+    }
+    expect(TEMPLATES.find((t) => t.kind === "notify.driver.offer")?.buttons).toHaveLength(2);
+  });
+});

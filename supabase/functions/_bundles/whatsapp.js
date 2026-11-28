@@ -1337,10 +1337,11 @@ var TEMPLATES = [
   },
   {
     kind: "notify.driver.offer",
-    name: "stt_driver_offer",
+    name: "stt_driver_offer_v2",
     category: "UTILITY",
-    body: "\u{1F695} Viaje disponible {{1}}: {{2}}. Ganancia {{3}}. Abr\xED la app de choferes para aceptarlo.",
-    example: ["STT-AB12CD", "s\xE1bado 28/11, 10:30", "$ 35.000"]
+    body: "\u{1F695} Viaje disponible {{1}}: {{2}}. Ganancia {{3}}. Aceptalo con el bot\xF3n o desde la app de choferes.",
+    example: ["STT-AB12CD", "s\xE1bado 28/11, 10:30", "$ 35.000"],
+    buttons: ["Aceptar", "Rechazar"]
   },
   {
     kind: "notify.driver.assigned",
@@ -1515,7 +1516,10 @@ async function runSetup(action, args, env2, g) {
           name: t.name,
           language: "es_AR",
           category: t.category,
-          components: [{ type: "BODY", text: t.body, example: { body_text: [t.example] } }]
+          components: [
+            { type: "BODY", text: t.body, example: { body_text: [t.example] } },
+            ...t.buttons ? [{ type: "BUTTONS", buttons: t.buttons.map((text) => ({ type: "QUICK_REPLY", text })) }] : []
+          ]
         });
         if (r.ok) {
           results.push({ kind: t.kind, name: t.name, status: r.data.status ?? "PENDING" });

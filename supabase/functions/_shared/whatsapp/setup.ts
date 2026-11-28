@@ -42,7 +42,7 @@ const metaError = (d: any) => ({ code: d?.error?.code ?? null, subcode: d?.error
 const PHONE_FIELDS = "id,display_phone_number,verified_name,name_status,code_verification_status,quality_rating,status,platform_type,messaging_limit_tier,webhook_configuration";
 
 /** Message templates SoyTuTaxi uses outside WhatsApp's 24-hour window (variables in the order notify.ts sends them). */
-export const TEMPLATES: { kind: string; name: string; category: "UTILITY"; body: string; example: string[] }[] = [
+export const TEMPLATES: { kind: string; name: string; category: "UTILITY"; body: string; example: string[]; buttons?: string[] }[] = [
   { kind: "notify.passenger.confirmed", name: "stt_trip_confirmed", category: "UTILITY",
     body: "✅ Tu viaje {{1}} del {{2}} está confirmado. Tu chofer es {{3}} ({{4}}). Detalles y estado: {{5}} ¡Buen viaje!",
     example: ["STT-AB12CD", "sábado 28/11, 10:30", "Carlos", "Toyota Corolla AB123CD", "https://bcuproject.github.io/soytutaxi/reserva/STT-AB12CD"] },
@@ -61,9 +61,9 @@ export const TEMPLATES: { kind: string; name: string; category: "UTILITY"; body:
     body: "¡Gracias por viajar con SoyTuTaxi! ¿Cómo estuvo tu viaje {{1}}? Podés calificarlo desde el link de tu reserva.", example: ["STT-AB12CD"] },
   { kind: "notify.passenger.refund", name: "stt_refund", category: "UTILITY",
     body: "Procesamos el reembolso de tu reserva {{1}}. Puede tardar unos días hábiles en verse en tu medio de pago.", example: ["STT-AB12CD"] },
-  { kind: "notify.driver.offer", name: "stt_driver_offer", category: "UTILITY",
-    body: "🚕 Viaje disponible {{1}}: {{2}}. Ganancia {{3}}. Abrí la app de choferes para aceptarlo.",
-    example: ["STT-AB12CD", "sábado 28/11, 10:30", "$ 35.000"] },
+  { kind: "notify.driver.offer", name: "stt_driver_offer_v2", category: "UTILITY",
+    body: "🚕 Viaje disponible {{1}}: {{2}}. Ganancia {{3}}. Aceptalo con el botón o desde la app de choferes.",
+    example: ["STT-AB12CD", "sábado 28/11, 10:30", "$ 35.000"] , buttons: ["Aceptar", "Rechazar"] },
   { kind: "notify.driver.assigned", name: "stt_driver_assigned", category: "UTILITY",
     body: "Tenés asignado el viaje {{1}} del {{2}}. Los detalles están en la app de choferes.", example: ["STT-AB12CD", "sábado 28/11, 10:30"] },
   { kind: "notify.driver.pickup_changed", name: "stt_driver_pickup_changed", category: "UTILITY",
@@ -225,7 +225,8 @@ export async function runSetup(action: SetupAction, args: Record<string, unknown
         if (ex) { results.push({ kind: t.kind, name: t.name, status: ex.status }); map[t.kind] = { name: t.name, language: ex.language }; continue; }
         const r = await g("POST", `${waba}/message_templates`, {
           name: t.name, language: "es_AR", category: t.category,
-          components: [{ type: "BODY", text: t.body, example: { body_text: [t.example] } }],
+          components: [{ type: "BODY", text: t.body, example: { body_text: [t.example] } },
+            ...(t.buttons ? [{ type: "BUTTONS", buttons: t.buttons.map((text) => ({ type: "QUICK_REPLY", text })) }] : [])],
         });
         if (r.ok) { results.push({ kind: t.kind, name: t.name, status: r.data.status ?? "PENDING" }); map[t.kind] = { name: t.name, language: "es_AR" }; }
         else results.push({ kind: t.kind, name: t.name, status: "ERROR", error: metaError(r.data) });
