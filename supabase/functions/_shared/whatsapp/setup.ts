@@ -8,7 +8,7 @@
 import { GRAPH_VERSION } from "./meta.ts";
 
 export type SetupAction = "status" | "add_number" | "request_code" | "verify_code" | "register" | "use_number"
-  | "webhook" | "calling" | "templates";
+  | "webhook" | "calling" | "templates" | "test_send";
 
 export interface SetupEnv {
   token: string;
@@ -202,6 +202,16 @@ export async function runSetup(action: SetupAction, args: Record<string, unknown
       if (!r.ok) return fail(400, "meta_error", { meta: metaError(r.data) });
       const s = await g("GET", `${phone}/settings`);
       return { ok: true, status: 200, body: { calling: s.data?.calling ?? null } };
+    }
+
+    case "test_send": {
+      // Sends Meta's built-in "hello_world" template to one number, to test sending and delivery webhooks.
+      if (!phone) return fail(422, "phone_required");
+      const to = str(args.to, 20).replace(/\D/g, "");
+      if (to.length < 8) return fail(422, "to_required");
+      const r = await g("POST", `${phone}/messages`, { messaging_product: "whatsapp", to, type: "template",
+        template: { name: "hello_world", language: { code: "en_US" } } });
+      return r.ok ? { ok: true, status: 200, body: { sent: r.data } } : fail(400, "meta_error", { meta: metaError(r.data) });
     }
 
     case "templates": {
