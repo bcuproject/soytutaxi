@@ -337,8 +337,14 @@ Deno.serve(async (req) => {
     log({ level: "warn", msg: "bad signature" });
     return json(401, { error: { code: "bad_signature" } });
   }
-  let parsed;
-  try { parsed = parseWebhook(JSON.parse(raw)); } catch { return json(400, { error: { code: "bad_payload" } }); }
+  let parsed, body;
+  try { body = JSON.parse(raw); parsed = parseWebhook(body); } catch { return json(400, { error: { code: "bad_payload" } }); }
+  // What Meta sent (event kinds only, no content): helps tell a lost tap from a template/status notice.
+  try {
+    const fields = (body?.entry ?? []).flatMap((e: { changes?: { field?: string; value?: { messages?: { type?: string }[] } }[] }) =>
+      (e.changes ?? []).map((c) => [c.field, ...(c.value?.messages ?? []).map((m) => m.type)].filter(Boolean).join(":")));
+    log({ level: "info", webhookIn: fields, msgs: parsed.messages.length, statuses: parsed.statuses.length, calls: parsed.calls.length });
+  } catch { /* logging only */ }
   const expected = RT.phoneId;
   if (expected && parsed.phoneNumberId && parsed.phoneNumberId !== expected) return json(200, { ignored: "other_number" });
 

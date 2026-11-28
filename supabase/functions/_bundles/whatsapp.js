@@ -3464,7 +3464,7 @@ Deno.serve(async (req) => {
     return json(200, r);
   }
   if (path.endsWith("/voice-tool")) {
-    const body = await req.json().catch(() => ({}));
+    const body2 = await req.json().catch(() => ({}));
     const cfg = await deps.config();
     const r = await voiceTool({
       cfg,
@@ -3486,22 +3486,22 @@ Deno.serve(async (req) => {
         const sent = await sendAndRecord(deps, call.conversationId, call.waId, m);
         return !sent.error;
       }
-    }, body ?? {});
-    if (r.status >= 400) log({ level: "warn", voiceTool: r.status, action: body?.action });
+    }, body2 ?? {});
+    if (r.status >= 400) log({ level: "warn", voiceTool: r.status, action: body2?.action });
     return json(r.status, r.body);
   }
   if (path.endsWith("/call-action")) {
     const user = await staffUser(req);
     if (!user) return json(401, { error: { code: "unauthenticated" } });
-    const body = await req.json().catch(() => ({}));
-    const r = await callAction(deps, user.id, (op) => staffOf(user.id, op), body ?? {});
+    const body2 = await req.json().catch(() => ({}));
+    const r = await callAction(deps, user.id, (op) => staffOf(user.id, op), body2 ?? {});
     return json(r.status, r.body);
   }
   if (path.endsWith("/bootstrap-admin")) {
-    const body = await req.json().catch(() => ({}));
-    const email = String(body?.email ?? "").trim().toLowerCase();
-    const password = String(body?.password ?? "");
-    const code = String(body?.code ?? "").trim().toUpperCase();
+    const body2 = await req.json().catch(() => ({}));
+    const email = String(body2?.email ?? "").trim().toLowerCase();
+    const password = String(body2?.password ?? "");
+    const code = String(body2?.code ?? "").trim().toUpperCase();
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return json(422, { error: { code: "invalid_email" } });
     if (password.length < 10) return json(422, { error: { code: "weak_password" } });
     const hash = await sha256Hex(`setup:${code}`);
@@ -3514,8 +3514,8 @@ Deno.serve(async (req) => {
     return json(200, { ok: true, existing: !!error });
   }
   if (path.endsWith("/setup")) {
-    const body = await req.json().catch(() => ({}));
-    const action = String(body?.action ?? "");
+    const body2 = await req.json().catch(() => ({}));
+    const action = String(body2?.action ?? "");
     let userId = null;
     const user = await staffUser(req);
     if (user) {
@@ -3532,7 +3532,7 @@ Deno.serve(async (req) => {
       await rpc("secrets_ensure_verify_token", {}).catch(() => false);
       await SEC.refresh(true);
     }
-    const r = await runSetup(action, body?.args ?? {}, {
+    const r = await runSetup(action, body2?.args ?? {}, {
       token: sec("WHATSAPP_ACCESS_TOKEN"),
       callbackUrl: `${SUPABASE_URL.replace(/\/$/, "")}/functions/v1/whatsapp`,
       verifyToken: sec("WHATSAPP_VERIFY_TOKEN"),
@@ -3567,11 +3567,11 @@ Deno.serve(async (req) => {
     if (!user) return json(401, { error: { code: "unauthenticated" } });
     const lk = { url: sec("LIVEKIT_URL"), apiKey: sec("LIVEKIT_API_KEY"), apiSecret: sec("LIVEKIT_API_SECRET") };
     if (!lk.url || !lk.apiKey || !lk.apiSecret) return json(503, { error: { code: "voice_not_configured" } });
-    const body = await req.json().catch(() => ({}));
-    const { data: row } = await db.from("wa_calls").select("operator_id").eq("id", String(body?.callId ?? "")).maybeSingle();
+    const body2 = await req.json().catch(() => ({}));
+    const { data: row } = await db.from("wa_calls").select("operator_id").eq("id", String(body2?.callId ?? "")).maybeSingle();
     if (!row) return json(404, { error: { code: "call_not_found" } });
     if (!await staffOf(user.id, row.operator_id)) return json(403, { error: { code: "forbidden" } });
-    const c = await waDb.callTransferClaim(String(body.callId), user.id);
+    const c = await waDb.callTransferClaim(String(body2.callId), user.id);
     if (!c || !c.bot_room) return json(409, { error: { code: "transfer_taken" } });
     const token = await mintLiveKitToken({
       apiKey: lk.apiKey,
@@ -3589,10 +3589,10 @@ Deno.serve(async (req) => {
     const user = await staffUser(req);
     if (!user) return json(401, { error: { code: "unauthenticated" } });
     const u = { user };
-    const body = await req.json().catch(() => ({}));
-    const text = String(body?.text ?? "").trim();
-    if (!body?.conversationId || !text || text.length > 4e3) return json(400, { error: { code: "invalid_request" } });
-    const { data: c } = await db.from("wa_conversations").select("id, operator_id, wa_id, last_inbound_at").eq("id", body.conversationId).maybeSingle();
+    const body2 = await req.json().catch(() => ({}));
+    const text = String(body2?.text ?? "").trim();
+    if (!body2?.conversationId || !text || text.length > 4e3) return json(400, { error: { code: "invalid_request" } });
+    const { data: c } = await db.from("wa_conversations").select("id, operator_id, wa_id, last_inbound_at").eq("id", body2.conversationId).maybeSingle();
     if (!c) return json(404, { error: { code: "conversation_not_found" } });
     if (!await staffOf(u.user.id, c.operator_id)) return json(403, { error: { code: "forbidden" } });
     if (!c.last_inbound_at || Date.now() - new Date(c.last_inbound_at).getTime() > 24 * 36e5) {
@@ -3609,11 +3609,17 @@ Deno.serve(async (req) => {
     log({ level: "warn", msg: "bad signature" });
     return json(401, { error: { code: "bad_signature" } });
   }
-  let parsed;
+  let parsed, body;
   try {
-    parsed = parseWebhook(JSON.parse(raw));
+    body = JSON.parse(raw);
+    parsed = parseWebhook(body);
   } catch {
     return json(400, { error: { code: "bad_payload" } });
+  }
+  try {
+    const fields = (body?.entry ?? []).flatMap((e) => (e.changes ?? []).map((c) => [c.field, ...(c.value?.messages ?? []).map((m) => m.type)].filter(Boolean).join(":")));
+    log({ level: "info", webhookIn: fields, msgs: parsed.messages.length, statuses: parsed.statuses.length, calls: parsed.calls.length });
+  } catch {
   }
   const expected = RT.phoneId;
   if (expected && parsed.phoneNumberId && parsed.phoneNumberId !== expected) return json(200, { ignored: "other_number" });
