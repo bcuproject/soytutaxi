@@ -42,6 +42,10 @@ STT_PROMPT = ("Phone call to an airport transfer company in Buenos Aires. The ca
 # Silence (s) before the caller's turn counts as finished. Live transcription keeps up, so the default 0.5 s is fine.
 MIN_ENDPOINTING_S = float(os.environ.get("SOYTUTAXI_MIN_ENDPOINTING", "0.5"))
 MAX_ENDPOINTING_S = float(os.environ.get("SOYTUTAXI_MAX_ENDPOINTING", "1.5"))  # cap: 5 s waits felt like dead air
+# Barge-in: the caller must talk this long and say this many words before Sofía stops (coughs, "mm-hm" and
+# street noise no longer cut her off). If it was only noise she carries on where she was.
+MIN_INTERRUPT_S = float(os.environ.get("SOYTUTAXI_MIN_INTERRUPT_S", "1.0"))
+MIN_INTERRUPT_WORDS = int(os.environ.get("SOYTUTAXI_MIN_INTERRUPT_WORDS", "2"))
 
 
 def make_stt(openai):
@@ -57,8 +61,10 @@ def make_session(AgentSession, silero, openai, fishaudio, tts_args):
     parts = dict(vad=silero.VAD.load(), stt=make_stt(openai), llm=openai.LLM(model=LLM_MODEL, temperature=0.3),
                  tts=fishaudio.TTS(**tts_args))
     # preemptive_generation: start thinking on the live transcript while the caller finishes the sentence.
-    for extra in (dict(min_endpointing_delay=MIN_ENDPOINTING_S, max_endpointing_delay=MAX_ENDPOINTING_S, preemptive_generation=True),
-                  dict(min_endpointing_delay=MIN_ENDPOINTING_S, max_endpointing_delay=MAX_ENDPOINTING_S), {}):
+    turns = dict(min_endpointing_delay=MIN_ENDPOINTING_S, max_endpointing_delay=MAX_ENDPOINTING_S)
+    barge = dict(min_interruption_duration=MIN_INTERRUPT_S, min_interruption_words=MIN_INTERRUPT_WORDS,
+                 resume_false_interruption=True)
+    for extra in ({**turns, **barge, "preemptive_generation": True}, {**turns, **barge}, turns, {}):
         try:
             return AgentSession(**parts, **extra)
         except TypeError:
