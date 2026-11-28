@@ -160,7 +160,10 @@ export async function runSetup(action: SetupAction, args: Record<string, unknown
     case "calling": {
       if (!phone) return fail(422, "phone_required");
       const enable = args.enable !== false;
-      const r = await g("POST", `${phone}/settings`, { calling: { status: enable ? "ENABLED" : "DISABLED", call_icon_visibility: "DEFAULT" } });
+      const r = await g("POST", `${phone}/settings`, { calling: enable
+        // Calls must arrive as webhooks (Central in the browser / Sofía on LiveKit), never forwarded over SIP.
+        ? { status: "ENABLED", call_icon_visibility: "DEFAULT", sip: { status: "DISABLED" } }
+        : { status: "DISABLED" } });
       if (!r.ok) return fail(400, "meta_error", { meta: metaError(r.data) });
       const s = await g("GET", `${phone}/settings`);
       return { ok: true, status: 200, body: { calling: s.data?.calling ?? null } };

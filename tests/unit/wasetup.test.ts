@@ -59,7 +59,7 @@ describe("WhatsApp setup", () => {
     expect(calls[1]).toEqual({ method: "POST", path: "222333444555", body: { webhook_configuration: { override_callback_uri: env.callbackUrl, verify_token: "verify-word" } } });
     const c = await runSetup("calling", {}, e2, g);
     expect(c.body).toEqual({ calling: { status: "ENABLED" } });
-    expect(calls.find((x) => x.path === "222333444555/settings" && x.method === "POST")!.body).toEqual({ calling: { status: "ENABLED", call_icon_visibility: "DEFAULT" } });
+    expect(calls.find((x) => x.path === "222333444555/settings" && x.method === "POST")!.body).toEqual({ calling: { status: "ENABLED", call_icon_visibility: "DEFAULT", sip: { status: "DISABLED" } } });
   });
 
   it("reports Meta's refusal (e.g. messaging limit too low for calling) in plain words", async () => {
