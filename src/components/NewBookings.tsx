@@ -1,3 +1,4 @@
+import { tr } from "../lib/staffLang";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { backend, type DispatchRow } from "../lib/backend";
 import { cx, fmtDateTime, fmtTime, formatMoney } from "../lib/format";
@@ -83,7 +84,7 @@ export function NewBookingsBell({ onOpen }: { onOpen: (r: DispatchRow) => void }
     if (prefsRef.current.desktop && typeof Notification !== "undefined" && Notification.permission === "granted" && document.hidden) {
       for (const r of fresh.slice(0, 3)) {
         try {
-          const n = new Notification(`Nueva reserva ${r.reference} · ${SOURCE_ES[r.source]?.label ?? r.source}`, {
+          const n = new Notification(`${tr("Nueva reserva")} ${r.reference} · ${tr(SOURCE_ES[r.source]?.label ?? r.source)}`, {
             body: `${r.passengerName} · ${fmtDateTime(r.agreedPickupAt)}\n${routeText(r)}`, tag: r.id,
           });
           n.onclick = () => { window.focus(); onOpen(r); };

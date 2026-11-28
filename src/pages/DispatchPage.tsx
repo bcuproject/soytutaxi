@@ -17,6 +17,7 @@ import { CallDesk, CallModeSwitch, useCallSettings } from "../components/CallDes
 import { useNavigate } from "react-router-dom";
 import { cx, fmtDateTime, fmtLocalDate, fmtTime, formatMoney } from "../lib/format";
 import { useConfig } from "./BookingPage";
+import { StaffLangSwitch } from "../lib/staffLang";
 
 // Spanish-first operational screen. Labels are centralised for later locale work.
 const L = {
@@ -48,7 +49,7 @@ export function StaffLogin({ onDone, title = L.title }: { onDone: (s: StaffSessi
   return (
     <div className="mx-auto max-w-sm px-5 py-24">
       <div className="rounded-3xl border border-ink-700 bg-ink-900 p-7">
-        <Logo />
+        <div className="flex items-center justify-between"><Logo /><StaffLangSwitch /></div>
         <h1 className="mt-6 text-xl font-semibold">{title}</h1>
         {backend.mode === "demo" ? (
           <>
@@ -191,6 +192,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
             ))}
           </nav>
           <div className="ml-auto flex items-center gap-3 text-sm">
+            <StaffLangSwitch />
             <CallModeSwitch compact settings={calls.settings} onChange={calls.change} />
             {backend.simulateCall && <Button variant="outline" className="py-1.5 text-xs" onClick={() => backend.simulateCall!()} data-testid="simulate-call">📞 Simular</Button>}
             <NewBookingsBell onOpen={openNew} />
@@ -632,7 +634,7 @@ function BookingDrawer({ row: r, drivers, board, onChanged, onClose }: { row: Di
             <div className="text-xs text-ink-300">{[r.passengerPhone, r.passengerEmail].filter(Boolean).join(" · ")}</div></dd></div>
           <div className={item}><dt className="text-ink-400">{L.money}</dt><dd>{r.amountMinor !== null ? formatMoney(r.amountMinor, r.currency!, "es-AR") : "—"} · {PAY_ES[r.paymentMode]} ({COLLECT_ES[r.collectionState] || "—"})</dd></div>
           <div className={item}><dt className="text-ink-400">{L.driver}</dt><dd>{r.driverName ? `${r.driverName} · ${r.vehiclePlate}` : "Sin asignar"}{r.holdExpiresAt && <div className="text-xs text-sky-300">Hold hasta {fmtTime(r.holdExpiresAt)}</div>}</dd></div>
-          {r.notes && <div className={item}><dt className="text-ink-400">{L.notes}</dt><dd>{r.notes}</dd></div>}
+          {r.notes && <div className={item}><dt className="text-ink-400">{L.notes}</dt><dd translate="no">{r.notes}</dd></div>}
         </dl>
 
         {msgOpen && r.passengerPhone && <PassengerMessage r={r} onClose={() => setMsgOpen(false)} />}

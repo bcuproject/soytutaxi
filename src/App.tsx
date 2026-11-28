@@ -6,6 +6,7 @@ import type { Locale } from "@shared/domain/types.ts";
 import { Button, DemoBanner, Logo } from "./components/ui";
 import { backend, type StaffSession } from "./lib/backend";
 import { LocaleContext, makeT } from "./lib/i18n";
+import { StaffLangProvider } from "./lib/staffLang";
 import BookingPage from "./pages/BookingPage";
 import DispatchPage from "./pages/DispatchPage";
 import DriverApp from "./pages/DriverApp";
@@ -54,7 +55,7 @@ function StaffOnly({ children }: { children: ReactNode }) {
   useEffect(() => { backend.staffSession().then(setS); }, []);
   if (s === undefined) return null;
   if (!s) return <div className="py-24 text-center"><p className="text-ink-300">Ingresá a despacho primero.</p><Link to="/despacho"><Button className="mt-4">Despacho</Button></Link></div>;
-  return <LocaleContext.Provider value={{ locale: "es-AR", setLocale: () => {}, t: makeT("es-AR") }}>{children}</LocaleContext.Provider>;
+  return <>{children}</>;
 }
 
 export default function App() {
@@ -66,11 +67,11 @@ export default function App() {
       <Routes>
         <Route path="/" element={<PassengerShell><BookingPage /></PassengerShell>} />
         <Route path="/reserva/:ref" element={<PassengerShell><StatusPage /></PassengerShell>} />
-        <Route path="/despacho" element={<DispatchPage />} />
+        <Route path="/despacho" element={<StaffLangProvider><DispatchPage /></StaffLangProvider>} />
         <Route path="/chofer" element={<DriverApp />} />
-        <Route path="/central" element={<CentralPage />} />
-        <Route path="/conexion" element={<ConexionPage />} />
-        <Route path="/despacho/nueva" element={<StaffOnly><div className="min-h-screen"><BookingPage staff /></div></StaffOnly>} />
+        <Route path="/central" element={<StaffLangProvider><CentralPage /></StaffLangProvider>} />
+        <Route path="/conexion" element={<StaffLangProvider><ConexionPage /></StaffLangProvider>} />
+        <Route path="/despacho/nueva" element={<StaffLangProvider><StaffOnly><div className="min-h-screen"><BookingPage staff /></div></StaffOnly></StaffLangProvider>} />
         <Route path="*" element={<PassengerShell><div className="py-24 text-center text-ink-400">404</div></PassengerShell>} />
       </Routes>
     </>

@@ -12,7 +12,7 @@ import { NewBookingsBell } from "../components/NewBookings";
 import { useNavigate } from "react-router-dom";
 import { backend, CommandError, type CallMode, type CallSettings, type DeskMethod, type DeskMode, type DispatchRow, type PastCall, type StaffSession, type WaCall } from "../lib/backend";
 import { cx, fmtDateTime, fmtTime, formatMoney } from "../lib/format";
-import { LocaleContext, makeT } from "../lib/i18n";
+import { StaffLangSwitch } from "../lib/staffLang";
 import BookingPage from "./BookingPage";
 import { StaffLogin } from "./DispatchPage";
 
@@ -38,9 +38,7 @@ export default function CentralPage() {
   if (session === undefined) return null;
   if (!session) return <StaffLogin onDone={setSession} title={L.title} />;
   return (
-    <LocaleContext.Provider value={{ locale: "es-AR", setLocale: () => {}, t: makeT("es-AR") }}>
-      <Central session={session} onSignOut={async () => { await backend.signOut(); setSession(null); }} />
-    </LocaleContext.Provider>
+    <Central session={session} onSignOut={async () => { await backend.signOut(); setSession(null); }} />
   );
 }
 
@@ -145,6 +143,7 @@ function Central({ session, onSignOut }: { session: StaffSession; onSignOut: () 
             ))}
           </nav>
           <div className="ml-auto flex flex-wrap items-center gap-3 text-sm">
+            <StaffLangSwitch />
             <div className="flex items-center gap-2" title="Cómo llegan las reservas nuevas a despacho">
               <span className="text-xs text-ink-400">Envío a despacho</span>
               <div className="flex rounded-lg bg-ink-900 p-1" role="radiogroup" aria-label="Modo de envío" data-testid="desk-mode">

@@ -1,3 +1,4 @@
+import { tr } from "../lib/staffLang";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { backend, CommandError, type AdminDriver, type ApprovalStatus, type VehicleClassOption } from "../lib/backend";
 import { cx, fmtDateTime } from "../lib/format";
@@ -40,7 +41,7 @@ export function DriverRoster() {
   const say = (t: string) => { setFlash(t); setTimeout(() => setFlash(null), 6000); };
 
   async function review(d: AdminDriver, status: ApprovalStatus) {
-    const note = status === "approved" ? null : window.prompt(status === "rejected" ? "Motivo del rechazo (lo ve el chofer):" : "Motivo de la suspensión:") ?? undefined;
+    const note = status === "approved" ? null : window.prompt(tr(status === "rejected" ? "Motivo del rechazo (lo ve el chofer):" : "Motivo de la suspensión:")) ?? undefined;
     if (note === undefined) return;
     try {
       await backend.setDriverApproval(d.id, status, note);

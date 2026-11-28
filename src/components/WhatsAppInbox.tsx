@@ -134,7 +134,7 @@ export function WhatsAppInbox({ onOpenBooking, onCount, initialConversationId }:
                 <div key={m.id} className={cx("flex", m.direction === "out" ? "justify-end" : "justify-start")}>
                   <div className={cx("max-w-[78%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-snug",
                     m.direction === "in" ? "rounded-bl-sm bg-ink-800 text-ink-100" : m.staff ? "rounded-br-sm bg-sky-700/70 text-white" : "rounded-br-sm bg-emerald-800/70 text-white")}>
-                    <Rich text={m.preview} />
+                    <div translate="no"><Rich text={m.preview} /></div>
                     <div className="mt-1 flex items-center justify-end gap-1.5 text-[10px] opacity-70">
                       {m.direction === "out" && <span>{m.staff ? "equipo" : "bot"}</span>}
                       <span>{fmtTime(m.at)}</span>
