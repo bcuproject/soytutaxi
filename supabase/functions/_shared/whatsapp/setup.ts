@@ -111,8 +111,11 @@ export async function runSetup(action: SetupAction, args: Record<string, unknown
           appWebhook = { fields: (sub?.fields ?? []).map((f: any) => f.name ?? f), defaultCallback: sub?.callback_url ?? null };
         } catch { appWebhook = null; }
       }
+      const me = await g("GET", "me?fields=id,name");
       return { ok: true, status: 200, body: {
         appWebhook,
+        tokenOwner: me.ok ? me.data : metaError(me.data),
+        tokenScopes: scopes.map((s) => ({ scope: s.scope, targets: s.target_ids ?? null })),
         tokenValid: !!dbg.data?.data?.is_valid, appId: dbg.data?.data?.app_id ?? null, expiresAt: dbg.data?.data?.expires_at ?? null,
         permissions, accounts, selected: { wabaId: waba || null, phoneNumberId: phone || null }, calling,
         callbackUrl: env.callbackUrl,
