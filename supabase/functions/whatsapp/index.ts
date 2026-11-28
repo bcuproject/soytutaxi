@@ -3,6 +3,9 @@
 //   POST /whatsapp              Meta webhook: X-Hub-Signature-256 checked with WHATSAPP_APP_SECRET
 //   POST /whatsapp/outbox       notification worker, called every minute by pg_cron (x-outbox-key)
 //   POST /whatsapp/staff-send   staff reply from the inbox (Supabase access token; admin, dispatcher or agent)
+//   POST /whatsapp/driver-claim     driver sets up their login from an invitation link (public, one-time token)
+//   POST /whatsapp/driver-signup    "Quiero ser chofer" application (public, pending until approved)
+//   POST /whatsapp/driver-notify    dispatch sends a driver their invitation / approval on WhatsApp
 //   POST /whatsapp/staff-message  staff message to a booking's passenger (text inside 24 h, template otherwise)
 //   POST /whatsapp/call-action  answer (SDP), reject or hang up a WhatsApp voice call (same staff check)
 //   POST /whatsapp/setup        WhatsApp connection setup (admin login; outbox key for no-code steps)
@@ -312,6 +315,104 @@ Deno.serve(async (req) => {
     const token = await mintLiveKitToken({ apiKey: lk.apiKey, apiSecret: lk.apiSecret, identity: `desk-${user.id}`,
       name: `Central (${user.email?.split("@")[0] ?? "staff"})`, room: c.bot_room, canPublish: true, ttlSeconds: 3600, metadata: { kind: "desk" } });
     return json(200, { url: lk.url, token, room: c.bot_room });
+  }
+
+  // --- Driver registration -------------------------------------------------------------------------------------
+  // POST /driver-claim {token, email, password}: the driver opened their invitation link and sets up their login.
+  if (path.endsWith("/driver-claim")) {
+    const body = await req.json().catch(() => ({}));
+    const token = String(body?.token ?? "");
+    const email = String(body?.email ?? "").trim().toLowerCase();
+    const password = String(body?.password ?? "");
+    if (!/^[0-9a-f]{64}$/.test(token)) return json(410, { error: { code: "invalid_invite" } });
+    const hash = await sha256Hex(`driver-invite:${token}`);
+    const inv = await rpc<{ driverId: string; name: string } | null>("driver_invite_peek", { p_token_hash: hash }).catch(() => null);
+    if (!inv) return json(410, { error: { code: "invalid_invite", message: "El link venció o ya se usó. Pedí uno nuevo a la central." } });
+    if (body?.peek) return json(200, { name: inv.name });
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return json(422, { error: { code: "invalid_email" } });
+    if (password.length < 8) return json(422, { error: { code: "weak_password", message: "La contraseña tiene que tener 8 caracteres o más." } });
+    const { data: created, error } = await db.auth.admin.createUser({ email, password, email_confirm: true });
+    if (error || !created?.user) {
+      const taken = /already|exists|registered/i.test(error?.message ?? "");
+      return json(taken ? 409 : 500, { error: { code: taken ? "email_in_use" : "signup_failed", message: taken ? "Ya hay una cuenta con ese email." : undefined } });
+    }
+    try { await rpc("driver_invite_claim", { p_token_hash: hash, p_user: created.user.id, p_email: email }); }
+    catch { return json(410, { error: { code: "invalid_invite" } }); }
+    log({ level: "info", driverClaim: inv.driverId });
+    return json(200, { ok: true, name: inv.name });
+  }
+
+  // POST /driver-signup: "Quiero ser chofer". The application waits for dispatch to approve it.
+  if (path.endsWith("/driver-signup")) {
+    const body = await req.json().catch(() => ({}));
+    const name = String(body?.name ?? "").trim().slice(0, 120);
+    const phone = "+" + String(body?.whatsapp ?? "").replace(/\D/g, "");
+    const email = String(body?.email ?? "").trim().toLowerCase();
+    const password = String(body?.password ?? "");
+    const plate = String(body?.plate ?? "").toUpperCase().replace(/\s/g, "");
+    const vehicleClass = String(body?.vehicleClass ?? "");
+    if (name.length < 3) return json(422, { error: { code: "invalid_name" } });
+    if (!/^\+[1-9][0-9]{7,14}$/.test(phone)) return json(422, { error: { code: "invalid_phone" } });
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return json(422, { error: { code: "invalid_email" } });
+    if (password.length < 8) return json(422, { error: { code: "weak_password", message: "La contraseña tiene que tener 8 caracteres o más." } });
+    if (!/^[A-Z0-9-]{5,10}$/.test(plate)) return json(422, { error: { code: "invalid_plate" } });
+    const cfg = await deps.config();
+    // Light abuse guard: at most 30 applications an hour, and one per WhatsApp number.
+    const since = new Date(Date.now() - 3600_000).toISOString();
+    const { count } = await db.from("drivers").select("id", { count: "exact", head: true }).eq("source", "signup").gte("created_at", since);
+    if ((count ?? 0) >= 30) return json(429, { error: { code: "too_many", message: "Probá de nuevo en un rato." } });
+    const { data: dup } = await db.from("drivers").select("id").eq("operator_id", cfg.operatorId).eq("whatsapp_e164", phone).maybeSingle();
+    if (dup) return json(409, { error: { code: "phone_in_use", message: "Ese WhatsApp ya está registrado. Escribile a la central." } });
+    const { data: created, error } = await db.auth.admin.createUser({ email, password, email_confirm: true });
+    if (error || !created?.user) {
+      const taken = /already|exists|registered/i.test(error?.message ?? "");
+      return json(taken ? 409 : 500, { error: { code: taken ? "email_in_use" : "signup_failed", message: taken ? "Ya hay una cuenta con ese email." : undefined } });
+    }
+    try {
+      await rpc("driver_signup", { p_operator: cfg.operatorId, p_user: created.user.id, p_email: email, p_full_name: name,
+        p_whatsapp: phone, p_vehicle_class: vehicleClass, p_plate: plate, p_vehicle_desc: String(body?.vehicleDesc ?? "").slice(0, 120) || null });
+    } catch (e) {
+      const c = String((e as { code?: string })?.code ?? "signup_failed");
+      await db.auth.admin.updateUserById(created.user.id, { ban_duration: "876000h" }).catch(() => {});   // unused login: lock it
+      return json(c === "vehicle_in_use" || c === "phone_in_use" ? 409 : 422, { error: { code: c } });
+    }
+    log({ level: "info", driverSignup: true });
+    return json(200, { ok: true });
+  }
+
+  // POST /driver-notify {driverId, kind: "invite"|"approved", link}: dispatch sends the driver their invitation or
+  // the good news on WhatsApp (a normal message inside 24 h of their last message, the approved template otherwise).
+  if (path.endsWith("/driver-notify")) {
+    const user = await staffUser(req);
+    if (!user) return json(401, { error: { code: "unauthenticated" } });
+    const body = await req.json().catch(() => ({}));
+    const kind = body?.kind === "approved" ? "approved" : body?.kind === "invite" ? "invite" : null;
+    const link = String(body?.link ?? "");
+    if (!kind || !body?.driverId || !link.startsWith(PUBLIC_APP_URL)) return json(400, { error: { code: "invalid_request" } });
+    const { data: d } = await db.from("drivers").select("id, operator_id, full_name, whatsapp_e164").eq("id", body.driverId).maybeSingle();
+    if (!d) return json(404, { error: { code: "driver_not_found" } });
+    if (!(await staffOf(user.id, d.operator_id))) return json(403, { error: { code: "forbidden" } });
+    const wa = String(d.whatsapp_e164 ?? "").replace(/\D/g, "");
+    if (wa.length < 8) return json(422, { error: { code: "no_phone" } });
+    if (!configured()) return json(503, { error: { code: "whatsapp_not_configured" } });
+    const convId = await deps.db.openConversationForNotify(d.operator_id, wa);
+    if (!convId) return json(500, { error: { code: "conversation_failed" } });
+    const { data: c } = await db.from("wa_conversations").select("wa_id, last_inbound_at").eq("id", convId).maybeSingle();
+    const open = !!c?.last_inbound_at && Date.now() - new Date(c.last_inbound_at).getTime() < 24 * 3600_000;
+    const first = String(d.full_name).split(" ")[0];
+    let m: Outbound;
+    if (open) {
+      m = { type: "text", text: kind === "invite"
+        ? `Hola ${first} 👋 Te sumamos como chofer de *SoyTuTaxi*. Creá tu acceso a la app de choferes acá:\n${link}\n\nEl link vence en 7 días.`
+        : `¡Hola ${first}! 🎉 Tu solicitud para manejar con *SoyTuTaxi* fue aprobada. Entrá a la app de choferes y activá tu turno para recibir viajes:\n${link}` };
+    } else {
+      const tpl = RT.templates[kind === "invite" ? "notify.driver.invite" : "notify.driver.approved"];
+      if (!tpl) return json(409, { error: { code: "template_missing" } });
+      m = { type: "template", name: tpl.name, language: tpl.language, params: [first, link] };
+    }
+    const r = await sendAndRecord(deps, convId, c?.wa_id ?? wa, m, user.id);
+    if (r.error) return json(502, { error: { code: /template/i.test(r.error) && !open ? "template_not_approved" : "send_failed", message: r.error } });
+    return json(200, { ok: true, mode: open ? "text" : "template" });
   }
 
   // --- Staff message to a booking's passenger (from the booking in Despacho). Inside 24 h of the passenger's last

@@ -141,6 +141,26 @@ await page.setViewport({ width: 1440, height: 900 });
 
 // Choferes: documents (expiring / missing) and pay; Informes
 await clickText('[role="tab"]', "Choferes");
+// Choferes → Plantel: applications to approve, "+ Nuevo chofer" with an invitation link
+await page.waitForSelector('[data-testid="driver-roster"]');
+assert(await page.$eval('[data-testid="driver-roster"]', (e) => e.innerText.includes("Ana Ruiz") && e.innerText.includes("Solicitud")), "driver applications show in Plantel");
+await clickText('[data-testid="driver-row-Ana Ruiz"] button', "Aprobar");
+await page.waitForFunction(() => document.querySelector('[data-testid="driver-roster"]')?.innerText.includes("Ana Ruiz aprobado"));
+assert(true, "dispatch approves an application");
+await page.click('[data-testid="new-driver"]');
+await page.waitForSelector('[data-testid="driver-form"]');
+await page.type('[data-testid="driver-name"]', "Pedro Gómez");
+await page.$eval('[data-testid="driver-phone"]', (e) => { e.value = ""; });
+await page.type('[data-testid="driver-phone"]', "+54 9 11 5555-0101");
+await page.type('[data-testid="driver-plate"]', "ab 123 zz");
+await page.click('[data-testid="driver-save"]');
+await page.waitForSelector('[data-testid="invite-dialog"]');
+assert(await page.$eval('[data-testid="invite-link"]', (e) => /\/chofer\?invite=[0-9a-z]{64}/.test(e.innerText)), "new driver gets a one-time invitation link");
+await page.screenshot({ path: `${SHOTS}/7e-driver-invite.png` });
+await clickText('[data-testid="invite-dialog"] button', "Cerrar");
+await page.waitForFunction(() => document.querySelector('[data-testid="driver-row-Pedro Gómez"]')?.innerText.includes("AB123ZZ"));
+assert(true, "new driver listed with their vehicle");
+await clickText('[data-testid="drivers-admin"] [role="tab"]', "Documentación");
 await page.waitForSelector('[data-testid="doc-row"]');
 assert(await page.$eval('[data-testid="drivers-admin"]', (e) => e.innerText.includes("Falta") && e.innerText.includes("Venció") && e.innerText.includes("Solo avisos")), "documents table shows missing and expired documents, warn-only by default");
 await clickText('[data-testid="doc-row"] button', "Falta");

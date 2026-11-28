@@ -1,5 +1,6 @@
 // Despacho → Choferes: required documents with expiry (and the blocking switch), and driver pay:
 // unsettled balance per driver, statement lines, adjustments, settlement and CSV export.
+import { DriverRoster } from "./DriverRoster";
 import { useCallback, useEffect, useState } from "react";
 import { backend, type Compliance, type DocKind, type DriverDoc, type FinanceRow, type MoneyTotal, type Statement } from "../lib/backend";
 import { cx, fmtDateShort, formatMoney } from "../lib/format";
@@ -22,16 +23,16 @@ const errText = (e: unknown) => {
 const money = (n: number, c: string) => formatMoney(n, c, "es-AR");
 
 export function DriversAdmin() {
-  const [view, setView] = useState<"docs" | "pay">("docs");
+  const [view, setView] = useState<"roster" | "docs" | "pay">("roster");
   return (
     <div data-testid="drivers-admin">
       <div className="mb-4 flex gap-1 rounded-lg bg-ink-900 p-1 text-sm" role="tablist">
-        {([["docs", "Documentación"], ["pay", "Pagos y liquidaciones"]] as const).map(([k, l]) => (
+        {([["roster", "Plantel"], ["docs", "Documentación"], ["pay", "Pagos y liquidaciones"]] as const).map(([k, l]) => (
           <button key={k} role="tab" aria-selected={view === k} onClick={() => setView(k)}
             className={cx("rounded-md px-3 py-1.5 font-medium", view === k ? "bg-ink-700 text-white" : "text-ink-400 hover:text-white")}>{l}</button>
         ))}
       </div>
-      {view === "docs" ? <Documents /> : <Pay />}
+      {view === "roster" ? <DriverRoster /> : view === "docs" ? <Documents /> : <Pay />}
     </div>
   );
 }

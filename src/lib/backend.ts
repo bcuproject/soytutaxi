@@ -65,6 +65,18 @@ export interface MyFlight {
   info: (BoardFlight & { airport: string; date: string }) | null; fetchedAt: string | null; error?: string; shiftMinutes: number | null;
 }
 
+// ---- Driver registration
+export type ApprovalStatus = "pending" | "approved" | "suspended" | "rejected";
+export interface AdminDriver {
+  id: string; fullName: string; whatsapp: string | null; email: string | null; status: ApprovalStatus; active: boolean;
+  source: "staff" | "signup"; hasLogin: boolean; whatsappVerified: boolean; createdAt: string; reviewedAt: string | null;
+  reviewNote: string | null; inviteOpen: boolean;
+  vehicle: { id: string; vehicleClass: string; plate: string; description: string | null; maxPassengers: number | null; maxLargeBags: number | null } | null;
+}
+export interface DriverInput { id?: string | null; fullName: string; whatsapp: string; vehicleClass: string; plate: string; vehicleDesc?: string | null; active?: boolean }
+export interface VehicleClassOption { code: string; nameEs: string; nameEn: string; maxPassengers: number; maxLargeBags: number }
+export interface DriverSignupInput { name: string; whatsapp: string; email: string; password: string; vehicleClass: string; plate: string; vehicleDesc?: string }
+
 export interface Backend {
   mode: "demo" | "live";
   api<T>(method: "GET" | "POST", path: string, body?: unknown, headers?: Record<string, string>): Promise<T>;
@@ -91,6 +103,19 @@ export interface Backend {
   driverMe(): Promise<DriverMe>;
   setShift(on: boolean): Promise<void>;
   reportLocation(p: { lat: number; lng: number; accuracy?: number | null; heading?: number | null; speed?: number | null; at: string }): Promise<void>;
+  adminDrivers(): Promise<AdminDriver[]>;
+  saveDriver(d: DriverInput): Promise<{ id: string }>;
+  setDriverApproval(id: string, status: ApprovalStatus, note?: string | null): Promise<void>;
+  /** One-time invitation link token for a driver without a login (7 days). */
+  driverInvite(id: string): Promise<{ token: string; name: string; whatsapp: string | null }>;
+  /** Send the driver their invitation / approval on WhatsApp. */
+  notifyDriver(id: string, kind: "invite" | "approved", link: string): Promise<{ mode: "text" | "template" }>;
+  vehicleClassOptions(): Promise<VehicleClassOption[]>;
+  /** Invitation link: peek (who it's for) or set up the login. */
+  driverClaim(token: string, login?: { email: string; password: string }): Promise<{ name: string }>;
+  driverSignup(d: DriverSignupInput): Promise<void>;
+  /** Signed-in user's driver application (any status), or null. */
+  driverApplication(): Promise<{ status: ApprovalStatus; active: boolean; fullName: string; note: string | null } | null>;
   /** Live session for the Android driver app (it reports GPS and checks offers in the background). Live mode only. */
   watchSession?(cb: (s: { url: string; anonKey: string; accessToken: string; expiresAt: number } | null) => void): () => void;
   driverOffers(): Promise<DriverOffer[]>;
@@ -362,6 +387,59 @@ class DemoBackend implements Backend {
   async driverMe(): Promise<DriverMe> { throw LIVE_ONLY(); }
   async setShift(): Promise<void> { throw LIVE_ONLY(); }
   async reportLocation(): Promise<void> { throw LIVE_ONLY(); }
+  private demoDrivers: AdminDriver[] | null = null;
+  async adminDrivers(): Promise<AdminDriver[]> {
+    if (!this.demoDrivers) {
+      const ds = await this.drivers();
+      this.demoDrivers = ds.map((d, i) => ({ id: d.id, fullName: d.fullName, whatsapp: d.whatsappE164 ?? null, email: null, status: "approved" as const,
+        active: d.active, source: "staff" as const, hasLogin: true, whatsappVerified: true, createdAt: new Date().toISOString(), reviewedAt: null,
+        reviewNote: null, inviteOpen: false, vehicle: { id: `v${i}`, vehicleClass: i % 3 === 1 ? "minivan" : "sedan", plate: `AB${100 + i}CD`, description: null, maxPassengers: null, maxLargeBags: null } }));
+      this.demoDrivers.unshift({ id: "demo-applicant", fullName: "Ana Ruiz", whatsapp: "+5491155550201", email: "ana@chofer.test", status: "pending",
+        active: true, source: "signup", hasLogin: true, whatsappVerified: false, createdAt: new Date().toISOString(), reviewedAt: null, reviewNote: null,
+        inviteOpen: false, vehicle: { id: "vx", vehicleClass: "sedan", plate: "AC555TT", description: "Fiat Cronos", maxPassengers: null, maxLargeBags: null } });
+    }
+    return this.demoDrivers.map((d) => ({ ...d }));
+  }
+  async saveDriver(d: DriverInput) {
+    const list = await this.adminDrivers();
+    const phone = "+" + d.whatsapp.replace(/\D/g, "");
+    if (d.fullName.trim().length < 3) throw new CommandError("invalid_name");
+    if (!/^\+[1-9][0-9]{7,14}$/.test(phone)) throw new CommandError("invalid_phone");
+    if (list.some((x) => x.whatsapp === phone && x.id !== d.id)) throw new CommandError("phone_in_use");
+    const plate = d.plate.toUpperCase().replace(/\s/g, "");
+    if (!/^[A-Z0-9-]{5,10}$/.test(plate)) throw new CommandError("invalid_plate");
+    const vehicle = { id: `v-${plate}`, vehicleClass: d.vehicleClass, plate, description: d.vehicleDesc ?? null, maxPassengers: null, maxLargeBags: null };
+    if (d.id) {
+      Object.assign(this.demoDrivers!.find((x) => x.id === d.id)!, { fullName: d.fullName.trim(), whatsapp: phone, vehicle, active: d.active ?? true });
+      return { id: d.id };
+    }
+    const id = `demo-${Date.now()}`;
+    this.demoDrivers!.push({ id, fullName: d.fullName.trim(), whatsapp: phone, email: null, status: "approved", active: true, source: "staff",
+      hasLogin: false, whatsappVerified: false, createdAt: new Date().toISOString(), reviewedAt: new Date().toISOString(), reviewNote: null, inviteOpen: false, vehicle });
+    return { id };
+  }
+  async setDriverApproval(id: string, status: ApprovalStatus, note?: string | null) {
+    await this.adminDrivers();
+    Object.assign(this.demoDrivers!.find((x) => x.id === id)!, { status, reviewNote: note ?? null, reviewedAt: new Date().toISOString() });
+  }
+  async driverInvite(id: string) {
+    await this.adminDrivers();
+    const d = this.demoDrivers!.find((x) => x.id === id)!;
+    if (d.hasLogin) throw new CommandError("driver_has_login");
+    d.inviteOpen = true;
+    return { token: "demo".padEnd(64, "0"), name: d.fullName, whatsapp: d.whatsapp };
+  }
+  async notifyDriver(): Promise<{ mode: "text" | "template" }> { return { mode: "text" }; }
+  async vehicleClassOptions(): Promise<VehicleClassOption[]> {
+    return [
+      { code: "sedan", nameEs: "Sedán", nameEn: "Sedan", maxPassengers: 4, maxLargeBags: 2 },
+      { code: "minivan", nameEs: "Minivan", nameEn: "Minivan", maxPassengers: 6, maxLargeBags: 6 },
+      { code: "van", nameEs: "Van", nameEn: "Van", maxPassengers: 12, maxLargeBags: 12 },
+    ];
+  }
+  async driverClaim(): Promise<{ name: string }> { throw LIVE_ONLY(); }
+  async driverSignup(): Promise<void> { throw LIVE_ONLY(); }
+  async driverApplication() { return null; }
   async driverOffers(): Promise<DriverOffer[]> { throw LIVE_ONLY(); }
   async respondOffer(): Promise<{ outcome: string }> { throw LIVE_ONLY(); }
   async driverJobs(): Promise<DriverJob[]> { throw LIVE_ONLY(); }
@@ -732,6 +810,40 @@ class SupabaseBackend implements Backend {
     }
     ch.subscribe();
     return () => { this.sb.removeChannel(ch); };
+  }
+  async adminDrivers() { return this.rpc<AdminDriver[]>("admin_drivers"); }
+  async saveDriver(d: DriverInput) {
+    return this.rpc<{ id: string }>("admin_save_driver", { p_driver: d.id ?? null, p_full_name: d.fullName, p_whatsapp: d.whatsapp,
+      p_vehicle_class: d.vehicleClass, p_plate: d.plate, p_vehicle_desc: d.vehicleDesc ?? null, p_active: d.active ?? true });
+  }
+  async setDriverApproval(id: string, status: ApprovalStatus, note?: string | null) {
+    await this.rpc("admin_set_driver_approval", { p_driver: id, p_status: status, p_note: note ?? null });
+  }
+  async driverInvite(id: string) { return this.rpc<{ token: string; name: string; whatsapp: string | null }>("admin_driver_invite", { p_driver: id }); }
+  async notifyDriver(id: string, kind: "invite" | "approved", link: string) {
+    const { data } = await this.sb.auth.getSession();
+    if (!data.session) throw new CommandError("unauthenticated");
+    const body = await this.fn("driver-notify", { driverId: id, kind, link }, data.session.access_token);
+    return { mode: body.mode === "template" ? "template" as const : "text" as const };
+  }
+  async vehicleClassOptions() { return this.rpc<VehicleClassOption[]>("vehicle_class_options"); }
+  async driverClaim(token: string, login?: { email: string; password: string }) {
+    const body = await this.fn("driver-claim", login ? { token, ...login } : { token, peek: true });
+    return { name: String(body.name ?? "") };
+  }
+  async driverSignup(d: DriverSignupInput) { await this.fn("driver-signup", { ...d }); }
+  async driverApplication() {
+    return this.rpc<{ status: ApprovalStatus; active: boolean; fullName: string; note: string | null } | null>("driver_application");
+  }
+  /** POST to the whatsapp function (public routes, or staff with a token). */
+  private async fn(route: string, payload: Record<string, unknown>, token?: string) {
+    const res = await fetch(`${this.url}/functions/v1/whatsapp/${route}`, {
+      method: "POST", headers: { apikey: this.anonKey, authorization: `Bearer ${token ?? this.anonKey}`, "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new CommandError(body?.error?.code ?? "request_failed", body?.error?.message);
+    return body;
   }
   async driverMe() { return this.rpc<DriverMe>("driver_me"); }
   async setShift(on: boolean) { await this.rpc("driver_set_shift", { p_on: on }); }

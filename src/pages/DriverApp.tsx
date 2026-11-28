@@ -32,7 +32,7 @@ const ERR: Record<string, string> = {
 };
 const errMsg = (e: unknown) => (e instanceof CommandError ? ERR[e.code] ?? e.message : navigator.onLine ? "Error inesperado." : "Sin conexión. Reintentá cuando vuelva la señal.");
 
-function Login({ onDone }: { onDone: (s: StaffSession) => void }) {
+function Login({ onDone, onSignup }: { onDone: (s: StaffSession) => void; onSignup: () => void }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [err, setErr] = useState<string | null>(null);
@@ -53,6 +53,12 @@ function Login({ onDone }: { onDone: (s: StaffSession) => void }) {
           {err && <p role="alert" className="text-sm text-red-400">{err}</p>}
           <Button type="submit">Ingresar</Button>
         </form>
+      )}
+      {backend.mode !== "demo" && (
+        <button onClick={onSignup} className="mt-6 w-full rounded-2xl border border-ink-700 p-4 text-left text-sm hover:bg-ink-900" data-testid="want-to-drive">
+          <b className="text-white">¿Querés manejar con SoyTuTaxi?</b><br />
+          <span className="text-ink-300">Anotate como chofer: te avisamos por WhatsApp cuando revisemos tu solicitud.</span>
+        </button>
       )}
       {!inNativeApp() && (
         <a href={DRIVER_APK_URL} className="mt-8 flex items-center gap-3 rounded-2xl border border-cab-500/40 bg-cab-500/10 p-4 text-sm hover:bg-cab-500/20" data-testid="download-apk">
@@ -77,8 +83,13 @@ export default function DriverApp() {
     document.head.appendChild(link);
     return () => link.remove();
   }, []);
+  const [invite, setInvite] = useState(() => new URLSearchParams(window.location.search).get("invite"));
+  const [signup, setSignup] = useState(false);
+  const clearInvite = () => { setInvite(null); window.history.replaceState(null, "", window.location.pathname); };
+  if (invite) return <InviteClaim token={invite} onDone={(sess) => { clearInvite(); setSession(sess); }} onCancel={clearInvite} />;
   if (session === undefined) return null;
-  if (!session) return <Login onDone={setSession} />;
+  if (!session && signup) return <Signup onDone={(sess) => { setSignup(false); setSession(sess); }} onCancel={() => setSignup(false)} />;
+  if (!session) return <Login onDone={setSession} onSignup={() => setSignup(true)} />;
   return <Driver onSignOut={async () => { await backend.signOut(); setSession(null); }} />;
 }
 
@@ -95,6 +106,7 @@ function Driver({ onSignOut }: { onSignOut: () => void }) {
   const [tab, setTab] = useState<"jobs" | "board" | "offers" | "flights" | "radio" | "earnings">("jobs");
   const [jobBoard, setJobBoard] = useState<JobBoard | null>(null);
   const [fatal, setFatal] = useState<string | null>(null);
+  const [application, setApplication] = useState<Awaited<ReturnType<typeof backend.driverApplication>>>(null);
   const [toast, setToast] = useState<{ ok: boolean; text: string } | null>(null);
   const [syncedAt, setSyncedAt] = useState<Date | null>(null);
   const [online, setOnline] = useState(navigator.onLine);
@@ -104,8 +116,12 @@ function Driver({ onSignOut }: { onSignOut: () => void }) {
   const refresh = useCallback(async () => {
     try {
       const [m, o, j, bd] = await Promise.all([backend.driverMe(), backend.driverOffers(), backend.driverJobs(), backend.jobBoard()]);
-      setMe(m); setOffers(o); setJobs(j); setJobBoard(bd); setSyncedAt(new Date()); setFatal(null);
+      setMe(m); setOffers(o); setJobs(j); setJobBoard(bd); setSyncedAt(new Date()); setFatal(null); setApplication(null);
     } catch (e) {
+      if (e instanceof CommandError && e.code === "not_a_driver") {
+        const a = await backend.driverApplication().catch(() => null);
+        if (a && a.status !== "approved") { setApplication(a); return; }
+      }
       if (e instanceof CommandError && (e.code === "not_a_driver" || e.code === "live_only")) setFatal(errMsg(e));
     }
   }, []);
@@ -131,6 +147,7 @@ function Driver({ onSignOut }: { onSignOut: () => void }) {
   useNativeSession();
   const gps = useLocationSharing(!!me?.onShift);
 
+  if (application) return <Application a={application} onRefresh={refresh} onSignOut={onSignOut} />;
   if (fatal) return <div className="mx-auto max-w-sm px-5 py-16"><Logo /><p className="mt-6 text-ink-300">{fatal}</p><Button variant="ghost" className="mt-4" onClick={onSignOut}>Salir</Button></div>;
   if (!me) return <div className="py-24 text-center text-ink-400">Cargando…</div>;
 
@@ -504,4 +521,108 @@ function useLocationSharing(on: boolean) {
   }, [on]);
 
   return { sentAt, accuracy, error };
+}
+
+
+// ------------------------------------------------------------------------------------------ registration
+const REG_ERR: Record<string, string> = {
+  invalid_invite: "El link venció o ya se usó. Pedile uno nuevo a la central.", email_in_use: "Ya hay una cuenta con ese email.",
+  weak_password: "La contraseña tiene que tener 8 caracteres o más.", invalid_email: "Revisá el email.",
+  invalid_name: "Escribí nombre y apellido.", invalid_phone: "WhatsApp inválido: con código de país, ej. +54 9 11 1234-5678.",
+  phone_in_use: "Ese WhatsApp ya está registrado. Escribile a la central.", invalid_plate: "Patente inválida (ej. AB123CD).",
+  invalid_vehicle_class: "Elegí el tipo de vehículo.", vehicle_in_use: "Ese vehículo ya está registrado con otro chofer.",
+  too_many: "Hay muchas solicitudes ahora. Probá de nuevo en un rato.",
+};
+const regErr = (e: unknown) => e instanceof CommandError ? REG_ERR[e.code] ?? (e.message && e.message !== e.code ? e.message : e.code) : (e as Error).message;
+
+/** Invitation link from dispatch: the driver chooses their email and password. */
+function InviteClaim({ token, onDone, onCancel }: { token: string; onDone: (s: StaffSession) => void; onCancel: () => void }) {
+  const [name, setName] = useState<string | null>(null);
+  const [bad, setBad] = useState<string | null>(null);
+  const [email, setEmail] = useState(""); const [pw, setPw] = useState(""); const [pw2, setPw2] = useState("");
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
+  useEffect(() => { backend.driverClaim(token).then((r) => setName(r.name), (e) => setBad(regErr(e))); }, [token]);
+  async function submit(e: FormEvent) {
+    e.preventDefault(); setErr(null);
+    if (pw !== pw2) return setErr("Las contraseñas no coinciden.");
+    setBusy(true);
+    try { await backend.driverClaim(token, { email, password: pw }); onDone(await backend.signIn(email, pw)); }
+    catch (x) { setErr(regErr(x)); } finally { setBusy(false); }
+  }
+  return (
+    <div className="mx-auto max-w-sm px-5 py-16" data-testid="invite-claim">
+      <Logo />
+      {bad ? <>
+        <p className="mt-6 text-ink-200">{bad}</p>
+        <Button variant="ghost" className="mt-4" onClick={onCancel}>Ir al inicio</Button>
+      </> : !name ? <p className="mt-6 text-ink-400">Cargando…</p> : <>
+        <h1 className="mt-6 text-2xl font-semibold">¡Hola {name.split(" ")[0]}!</h1>
+        <p className="mt-2 text-sm text-ink-300">Creá tu acceso a la app de choferes de SoyTuTaxi. Vas a entrar siempre con este email y contraseña.</p>
+        <form onSubmit={submit} className="mt-6 grid gap-4">
+          <Field label="Email"><Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required /></Field>
+          <Field label="Contraseña (8 o más caracteres)"><Input type="password" value={pw} onChange={(e) => setPw(e.target.value)} autoComplete="new-password" minLength={8} required /></Field>
+          <Field label="Repetí la contraseña"><Input type="password" value={pw2} onChange={(e) => setPw2(e.target.value)} autoComplete="new-password" minLength={8} required /></Field>
+          {err && <p role="alert" className="text-sm text-red-400">{err}</p>}
+          <Button type="submit" disabled={busy}>{busy ? "Creando…" : "Crear mi acceso"}</Button>
+        </form>
+      </>}
+    </div>
+  );
+}
+
+/** "Quiero ser chofer": the application waits for dispatch to approve it. */
+function Signup({ onDone, onCancel }: { onDone: (s: StaffSession) => void; onCancel: () => void }) {
+  const [classes, setClasses] = useState<{ code: string; nameEs: string; maxPassengers: number }[]>([]);
+  const [f, setF] = useState({ name: "", whatsapp: "+549", email: "", password: "", vehicleClass: "", plate: "", vehicleDesc: "" });
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
+  useEffect(() => { backend.vehicleClassOptions().then((c) => { setClasses(c); setF((x) => ({ ...x, vehicleClass: x.vehicleClass || c[0]?.code || "" })); }).catch(() => {}); }, []);
+  const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
+  async function submit(e: FormEvent) {
+    e.preventDefault(); setBusy(true); setErr(null);
+    try { await backend.driverSignup(f); onDone(await backend.signIn(f.email.trim().toLowerCase(), f.password)); }
+    catch (x) { setErr(regErr(x)); } finally { setBusy(false); }
+  }
+  return (
+    <div className="mx-auto max-w-sm px-5 py-12" data-testid="driver-signup">
+      <Logo />
+      <h1 className="mt-6 text-2xl font-semibold">Quiero ser chofer</h1>
+      <p className="mt-2 text-sm text-ink-300">Completá tus datos y los de tu vehículo. La central revisa la solicitud y te avisa por WhatsApp.</p>
+      <form onSubmit={submit} className="mt-6 grid gap-4">
+        <Field label="Nombre y apellido"><Input value={f.name} onChange={set("name")} autoComplete="name" required /></Field>
+        <Field label="WhatsApp (con código de país)"><Input type="tel" value={f.whatsapp} onChange={set("whatsapp")} autoComplete="tel" required /></Field>
+        <Field label="Tipo de vehículo">
+          <select value={f.vehicleClass} onChange={set("vehicleClass")} className="w-full rounded-xl border border-ink-700 bg-ink-900 px-3 py-2.5 text-sm text-white">
+            {classes.map((c) => <option key={c.code} value={c.code}>{c.nameEs} · hasta {c.maxPassengers} pasajeros</option>)}
+          </select>
+        </Field>
+        <Field label="Patente"><Input value={f.plate} onChange={set("plate")} placeholder="AB123CD" required /></Field>
+        <Field label="Modelo y color"><Input value={f.vehicleDesc} onChange={set("vehicleDesc")} placeholder="Toyota Corolla gris" /></Field>
+        <Field label="Email (para entrar a la app)"><Input type="email" value={f.email} onChange={set("email")} autoComplete="username" required /></Field>
+        <Field label="Contraseña (8 o más caracteres)"><Input type="password" value={f.password} onChange={set("password")} autoComplete="new-password" minLength={8} required /></Field>
+        {err && <p role="alert" className="text-sm text-red-400">{err}</p>}
+        <Button type="submit" disabled={busy}>{busy ? "Enviando…" : "Enviar solicitud"}</Button>
+        <Button type="button" variant="ghost" onClick={onCancel}>Ya tengo cuenta</Button>
+      </form>
+    </div>
+  );
+}
+
+function Application({ a, onRefresh, onSignOut }: { a: NonNullable<Awaited<ReturnType<typeof backend.driverApplication>>>; onRefresh: () => void; onSignOut: () => void }) {
+  const msg = a.status === "pending"
+    ? { t: "Tu solicitud está en revisión", d: "La central está revisando tus datos. Te avisamos por WhatsApp apenas te aprueben; después vas a poder activar tu turno y recibir viajes." }
+    : a.status === "suspended"
+    ? { t: "Tu cuenta está suspendida", d: "Por ahora no podés recibir viajes. Escribile a la central para resolverlo." }
+    : { t: "Tu solicitud no fue aprobada", d: "Si creés que es un error, escribile a la central." };
+  return (
+    <div className="mx-auto max-w-sm px-5 py-16" data-testid="driver-application">
+      <Logo />
+      <h1 className="mt-6 text-2xl font-semibold">{msg.t}</h1>
+      <p className="mt-2 text-sm text-ink-300">Hola {a.fullName.split(" ")[0]}. {msg.d}</p>
+      {a.note && a.status !== "pending" && <p className="mt-3 rounded-xl bg-ink-900 p-3 text-sm text-ink-200">Motivo: {a.note}</p>}
+      <div className="mt-6 flex gap-2">
+        <Button variant="outline" onClick={onRefresh}>Actualizar</Button>
+        <Button variant="ghost" onClick={onSignOut}>Salir</Button>
+      </div>
+    </div>
+  );
 }
