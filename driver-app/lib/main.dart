@@ -39,7 +39,7 @@ const offerChannel = AndroidNotificationDetails(
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await notifications.initialize(
-    const InitializationSettings(android: AndroidInitializationSettings('@mipmap/ic_launcher')),
+    settings: const InitializationSettings(android: AndroidInitializationSettings('@mipmap/ic_launcher')),
   );
   runApp(const DriverApp());
 }
@@ -223,7 +223,9 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
     } else if (r != null && r.statusCode == 401) {
       tellPage({'error': 'Abrí la app para renovar la sesión.'});
       if (life != AppLifecycleState.resumed) {
-        notifications.show(2, 'SoyTuTaxi', 'Abrí la app: hay que renovar la sesión para seguir en el mapa.', const NotificationDetails(android: offerChannel));
+        notifications.show(
+            id: 2, title: 'SoyTuTaxi', body: 'Abrí la app: hay que renovar la sesión para seguir en el mapa.',
+            notificationDetails: const NotificationDetails(android: offerChannel));
       }
     } else {
       tellPage({'error': 'No se pudo enviar la ubicación.'});
@@ -247,8 +249,9 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
     final where = o['direction'] == 'from_airport' ? '${o['airport']} → ${o['zone'] ?? ''}' : '${o['zone'] ?? ''} → ${o['airport']}';
     final when = DateTime.tryParse('${o['pickupAt']}')?.toLocal();
     final hhmm = when == null ? '' : '${when.day}/${when.month} ${when.hour.toString().padLeft(2, '0')}:${when.minute.toString().padLeft(2, '0')}';
-    await notifications.show(1, '🚕 Viaje nuevo · $hhmm', '$where · ${o['passengers']} pax. Abrí la app para aceptarlo.',
-        const NotificationDetails(android: offerChannel));
+    await notifications.show(
+        id: 1, title: '🚕 Viaje nuevo · $hhmm', body: '$where · ${o['passengers']} pax. Abrí la app para aceptarlo.',
+        notificationDetails: const NotificationDetails(android: offerChannel));
   }
 
   void tellPage(Map<String, dynamic> detail) {
