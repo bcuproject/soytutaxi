@@ -763,8 +763,9 @@ class SupabaseBackend implements Backend {
     return email ? { email, label: email } : null;
   }
   async signIn(email: string, password: string) {
-    const { data, error } = await this.sb.auth.signInWithPassword({ email, password });
-    if (error) throw error;
+    // Phones often add a trailing space or a capital letter to the email.
+    const { data, error } = await this.sb.auth.signInWithPassword({ email: email.trim().toLowerCase(), password });
+    if (error) throw new Error(error.message === "Invalid login credentials" ? "Email o contraseña incorrectos." : error.message);
     return { email: data.user.email!, label: data.user.email! };
   }
   async signInDemo(): Promise<StaffSession> {

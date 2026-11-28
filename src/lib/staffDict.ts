@@ -306,6 +306,7 @@ export const EN: Record<string, string> = {
   "Plantillas enviadas a Meta para aprobación.": "Templates sent to Meta for approval.", "Crear plantillas": "Create templates",
   "Solo cambia este número: las otras líneas de la cuenta siguen igual. Para llamadas, Meta exige un límite de mensajería de 2.000 por día o más.": "Only this number changes: the account's other lines stay as they are. For calls, Meta requires a messaging limit of 2,000 per day or more.",
   "Ingresá a despacho primero.": "Sign in to dispatch first.",
+  "Email o contraseña incorrectos.": "Wrong email or password.",
   "equipo": "team", "viajes": "trips", "confirmados": "confirmed", "verificado": "checked", "chofer": "driver", "pasajero": "passenger", "despacho": "dispatch", "sistema": "system",
   "mapa": "map", "mano": "carry-on", "llega": "arrives", "salidas": "departures", "Aprobados": "Approved", "Suspendidos": "Suspended",
   "Rechazados": "Rejected", "programado": "scheduled", "demorado": "delayed", "embarcando": "boarding", "aproximando": "approaching",
