@@ -88,6 +88,13 @@ describe("WhatsApp booking — guided buttons", () => {
     expect([...store.bookings.values()].at(-1)).toMatchObject({ paymentMode: "prepaid", contact: { name: "nicolas" } });
   });
 
+  it("typed 'quiero hacer una reserva' or '1' at the menu starts the booking", async () => {
+    await send("hola");
+    expect(ids(await send("quiero hacer una reserva"))).toEqual(["dir:from_airport", "dir:to_airport", "menu:staff"]);
+    await send("cancelar");
+    expect(ids(await send("1"))).toEqual(["dir:from_airport", "dir:to_airport", "menu:staff"]);
+  });
+
   it("reads typed payment choices", () => {
     const both = ["prepaid", "pay_on_pickup_cash"];
     expect(typedPayment("pago online", both)).toBe("prepaid");
@@ -457,5 +464,16 @@ describe("WhatsApp assistant — free questions with the customer's memory", () 
     expect(looksLikeQuestion("do you have child seats")).toBe(true);
     expect(looksLikeQuestion("Av. Corrientes 1234")).toBe(false);
     expect(looksLikeQuestion("3")).toBe(false);
+  });
+});
+
+describe("typing instead of tapping the menu", () => {
+  it("'quiero hacer una reserva' and '1' start a booking; '3' calls a person", async () => {
+    const { wantsBooking } = await import("@shared/whatsapp/parse.ts");
+    expect(wantsBooking("quiero hacer una reserva")).toBe(true);
+    expect(wantsBooking("necesito un taxi")).toBe(true);
+    expect(wantsBooking("I want to book a transfer")).toBe(true);
+    expect(wantsBooking("mi reserva")).toBe(false);
+    expect(wantsBooking("hola")).toBe(false);
   });
 });

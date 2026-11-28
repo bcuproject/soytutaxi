@@ -1554,7 +1554,7 @@ function secretSource(db2, env2, ttlMs = 3e4) {
 
 // supabase/functions/_shared/whatsapp/copy.ts
 var es = {
-  welcome: '\xA1Hola{name}! \u{1F695} Soy el asistente de *SoyTuTaxi*. Reservo traslados entre Ezeiza o Aeroparque y la ciudad, con tarifa fija.\n\nPod\xE9s escribirme todo junto, por ejemplo: _"Llego a Ezeiza ma\xF1ana 10:30 en AR1303, voy a Palermo, somos 2 con 2 valijas"_.',
+  welcome: '\xA1Hola{name}! \u{1F695} Soy el asistente de *SoyTuTaxi*. Reservo traslados entre Ezeiza o Aeroparque y la ciudad, con tarifa fija.\n\nPod\xE9s escribirme todo junto, por ejemplo: _"Llego a Ezeiza ma\xF1ana 10:30 en AR1303, voy a Palermo, somos 2 con 2 valijas"_.\n\nO toc\xE1 un bot\xF3n (o escrib\xED *1* reservar \xB7 *2* mi reserva \xB7 *3* hablar con alguien).',
   nPayDue: "\u{1F695} *\xA1Tenemos chofer para {ref}!*\n\n{route}\n\u{1F5D3}\uFE0F {when}\n\nPara confirmarlo, pag\xE1 *{price}* con Mercado Pago (el chofer queda reservado unos minutos):\n{url}",
   nPickupChanged: "\u{1F552} *Cambi\xF3 el horario de b\xFAsqueda de {ref}*\n\nSeg\xFAn tu vuelo, ahora te buscamos el {when}.\n\nDetalle: {url}",
   nDriverPickupChanged: "\u{1F552} *{ref}*: nueva hora de b\xFAsqueda {when} (vuelo {flight}).",
@@ -1566,7 +1566,7 @@ var es = {
   btnDecline: "\u274C Rechazar",
   nAssigned: "\u{1F4CB} *Viaje asignado {ref}*\n{route}\n\u{1F5D3}\uFE0F {when}\nDetalles en la app: {url}",
   nReleased: "\u21A9\uFE0F El viaje *{ref}* se quit\xF3 de tu agenda.",
-  menuShort: "\xBFEn qu\xE9 te ayudo?",
+  menuShort: "\xBFEn qu\xE9 te ayudo? Toc\xE1 un bot\xF3n o escrib\xED *1* reservar \xB7 *2* mi reserva \xB7 *3* hablar con alguien.",
   menuBook: "\u{1F695} Reservar",
   menuCheck: "\u{1F50E} Mi reserva",
   menuStaff: "\u{1F464} Hablar c/ alguien",
@@ -1690,7 +1690,9 @@ var es = {
 var en = {
   welcome: `Hi{name}! \u{1F695} I'm the *SoyTuTaxi* assistant. I book fixed-fare transfers between Ezeiza or Aeroparque and the city.
 
-You can send everything at once, e.g. _"Landing at Ezeiza tomorrow 10:30 on AR1303, going to Palermo, 2 people with 2 suitcases"_.`,
+You can send everything at once, e.g. _"Landing at Ezeiza tomorrow 10:30 on AR1303, going to Palermo, 2 people with 2 suitcases"_.
+
+Or tap a button (or type *1* book \xB7 *2* my booking \xB7 *3* talk to a person).`,
   nPayDue: "\u{1F695} *We have a driver for {ref}!*\n\n{route}\n\u{1F5D3}\uFE0F {when}\n\nTo confirm, pay *{price}* with Mercado Pago (the driver is held for a few minutes):\n{url}",
   nPickupChanged: "\u{1F552} *Pickup time changed for {ref}*\n\nBased on your flight, we'll now meet you on {when}.\n\nDetails: {url}",
   nDriverPickupChanged: "\u{1F552} *{ref}*: new pickup time {when} (flight {flight}).",
@@ -1702,7 +1704,7 @@ You can send everything at once, e.g. _"Landing at Ezeiza tomorrow 10:30 on AR13
   btnDecline: "\u274C Decline",
   nAssigned: "\u{1F4CB} *Trip assigned {ref}*\n{route}\n\u{1F5D3}\uFE0F {when}\nDetails in the app: {url}",
   nReleased: "\u21A9\uFE0F Trip *{ref}* was removed from your schedule.",
-  menuShort: "How can I help?",
+  menuShort: "How can I help? Tap a button or type *1* book \xB7 *2* my booking \xB7 *3* talk to a person.",
   menuBook: "\u{1F695} Book a transfer",
   menuCheck: "\u{1F50E} My booking",
   menuStaff: "\u{1F464} Talk to a person",
@@ -2000,6 +2002,11 @@ function detectLanguage(text) {
 var wantsStaff = (text) => /\b(humano|persona real|hablar con (una )?persona|operador|operadora|agente|hablar con alguien|atencion humana|staff|human|agent|real person|a person|speak to someone|talk to someone)\b/.test(strip(text));
 var wantsMenu = (text) => /^(menu|menú|hola|hi|hello|hey|buenas|buen dia|buenos dias|buenas tardes|buenas noches|inicio|start|empezar)[!. ]*$/.test(strip(text));
 var wantsCancel = (text) => /^(cancelar|cancel|salir|exit|reset|empezar de nuevo|start over)[!. ]*$/.test(strip(text));
+var wantsBooking = (text) => {
+  const p = strip(text);
+  if (/\b(mi reserva|mis reservas|my booking|cancel)/.test(p)) return false;
+  return /\b(reserv\w*|book\w*|taxi|remis\w*|traslado\w*|transfer\w*|viaje|un auto|un coche|ride|cab)\b/.test(p);
+};
 var wantsStatus = (text) => /\b(mi reserva|estado|status|my booking|check booking|consultar)\b/.test(strip(text));
 function extractAll(text, zones, today, locale) {
   const e = {};
@@ -2134,6 +2141,15 @@ var Turn = class {
       this.step = "direction";
       return this.next();
     }
+    if (!this.id && ["menu", "done"].includes(this.step)) {
+      if (/^\s*1\s*$/.test(this.text)) {
+        this.resetDraft();
+        this.step = "direction";
+        return this.next();
+      }
+      if (/^\s*2\s*$/.test(this.text)) return this.listBookings();
+      if (/^\s*3\s*$/.test(this.text)) return this.handoff("staffOn");
+    }
     if (this.id) return this.applyReply();
     if (this.msg.type === "location" && this.msg.location) return this.applyLocation();
     if (this.msg.type === "other") {
@@ -2160,7 +2176,7 @@ var Turn = class {
     }
     const changed = this.merge(extracted);
     if (["menu", "done", "handoff"].includes(this.step) && !changed && !captured) {
-      if (wantsNewTrip) {
+      if (wantsNewTrip || this.step !== "handoff" && wantsBooking(this.text)) {
         this.resetDraft();
         this.step = "direction";
         return this.next();

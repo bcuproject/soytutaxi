@@ -2,7 +2,7 @@
 import type { Locale } from "../domain/types.ts";
 
 const es = {
-  welcome: "¡Hola{name}! 🚕 Soy el asistente de *SoyTuTaxi*. Reservo traslados entre Ezeiza o Aeroparque y la ciudad, con tarifa fija.\n\nPodés escribirme todo junto, por ejemplo: _\"Llego a Ezeiza mañana 10:30 en AR1303, voy a Palermo, somos 2 con 2 valijas\"_.",
+  welcome: "¡Hola{name}! 🚕 Soy el asistente de *SoyTuTaxi*. Reservo traslados entre Ezeiza o Aeroparque y la ciudad, con tarifa fija.\n\nPodés escribirme todo junto, por ejemplo: _\"Llego a Ezeiza mañana 10:30 en AR1303, voy a Palermo, somos 2 con 2 valijas\"_.\n\nO tocá un botón (o escribí *1* reservar · *2* mi reserva · *3* hablar con alguien).",
   nPayDue: "🚕 *¡Tenemos chofer para {ref}!*\n\n{route}\n🗓️ {when}\n\nPara confirmarlo, pagá *{price}* con Mercado Pago (el chofer queda reservado unos minutos):\n{url}",
   nPickupChanged: "🕒 *Cambió el horario de búsqueda de {ref}*\n\nSegún tu vuelo, ahora te buscamos el {when}.\n\nDetalle: {url}",
   nDriverPickupChanged: "🕒 *{ref}*: nueva hora de búsqueda {when} (vuelo {flight}).",
@@ -13,7 +13,7 @@ const es = {
   btnAccept: "✅ Aceptar", btnDecline: "❌ Rechazar",
   nAssigned: "📋 *Viaje asignado {ref}*\n{route}\n🗓️ {when}\nDetalles en la app: {url}",
   nReleased: "↩️ El viaje *{ref}* se quitó de tu agenda.",
-  menuShort: "¿En qué te ayudo?",
+  menuShort: "¿En qué te ayudo? Tocá un botón o escribí *1* reservar · *2* mi reserva · *3* hablar con alguien.",
   menuBook: "🚕 Reservar", menuCheck: "🔎 Mi reserva", menuStaff: "👤 Hablar c/ alguien",
   langHint: "Write in English? Reply *EN*.",
   askDirection: "¿Tu viaje es *desde* el aeropuerto o *hacia* el aeropuerto?",
@@ -97,7 +97,7 @@ const es = {
 type Copy = typeof es;
 
 const en: Copy = {
-  welcome: "Hi{name}! 🚕 I'm the *SoyTuTaxi* assistant. I book fixed-fare transfers between Ezeiza or Aeroparque and the city.\n\nYou can send everything at once, e.g. _\"Landing at Ezeiza tomorrow 10:30 on AR1303, going to Palermo, 2 people with 2 suitcases\"_.",
+  welcome: "Hi{name}! 🚕 I'm the *SoyTuTaxi* assistant. I book fixed-fare transfers between Ezeiza or Aeroparque and the city.\n\nYou can send everything at once, e.g. _\"Landing at Ezeiza tomorrow 10:30 on AR1303, going to Palermo, 2 people with 2 suitcases\"_.\n\nOr tap a button (or type *1* book · *2* my booking · *3* talk to a person).",
   nPayDue: "🚕 *We have a driver for {ref}!*\n\n{route}\n🗓️ {when}\n\nTo confirm, pay *{price}* with Mercado Pago (the driver is held for a few minutes):\n{url}",
   nPickupChanged: "🕒 *Pickup time changed for {ref}*\n\nBased on your flight, we'll now meet you on {when}.\n\nDetails: {url}",
   nDriverPickupChanged: "🕒 *{ref}*: new pickup time {when} (flight {flight}).",
@@ -108,7 +108,7 @@ const en: Copy = {
   btnAccept: "✅ Accept", btnDecline: "❌ Decline",
   nAssigned: "📋 *Trip assigned {ref}*\n{route}\n🗓️ {when}\nDetails in the app: {url}",
   nReleased: "↩️ Trip *{ref}* was removed from your schedule.",
-  menuShort: "How can I help?",
+  menuShort: "How can I help? Tap a button or type *1* book · *2* my booking · *3* talk to a person.",
   menuBook: "🚕 Book a transfer", menuCheck: "🔎 My booking", menuStaff: "👤 Talk to a person",
   langHint: "¿Preferís español? Respondé *ES*.",
   askDirection: "Is your trip *from* the airport or *to* the airport?",

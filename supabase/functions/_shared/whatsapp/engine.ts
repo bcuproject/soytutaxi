@@ -14,7 +14,7 @@ import { customerFacts, operatorFacts, type CustomerContext } from "./facts.ts";
 import { say } from "./copy.ts";
 import type { InboundMessage, Outbound } from "./meta.ts";
 import {
-  extractAll, parseCount, parseDate, parseFlight, parseTime, strip, wantsCancel, wantsMenu, wantsStaff, wantsStatus,
+  extractAll, parseCount, parseDate, parseFlight, parseTime, strip, wantsBooking, wantsCancel, wantsMenu, wantsStaff, wantsStatus,
   type Extracted,
 } from "./parse.ts";
 
@@ -195,6 +195,12 @@ class Turn {
       return;
     }
     if (this.id === "menu:book") { this.resetDraft(); this.step = "direction"; return this.next(); }
+    // Typed menu choices work like the buttons: "1"/"2"/"3", or plain words.
+    if (!this.id && ["menu", "done"].includes(this.step)) {
+      if (/^\s*1\s*$/.test(this.text)) { this.resetDraft(); this.step = "direction"; return this.next(); }
+      if (/^\s*2\s*$/.test(this.text)) return this.listBookings();
+      if (/^\s*3\s*$/.test(this.text)) return this.handoff("staffOn");
+    }
 
     // Button / list replies carry exact values.
     if (this.id) return this.applyReply();
@@ -229,7 +235,7 @@ class Turn {
     const changed = this.merge(extracted);
 
     if (["menu", "done", "handoff"].includes(this.step) && !changed && !captured) {
-      if (wantsNewTrip) { this.resetDraft(); this.step = "direction"; return this.next(); }
+      if (wantsNewTrip || (this.step !== "handoff" && wantsBooking(this.text))) { this.resetDraft(); this.step = "direction"; return this.next(); }
       if (this.step === "done" && this.draft.lastRef && !wantsMenu(this.text)) return this.menu(false);
       return this.menu(true);
     }

@@ -180,6 +180,13 @@ export const wantsStaff = (text: string) =>
   /\b(humano|persona real|hablar con (una )?persona|operador|operadora|agente|hablar con alguien|atencion humana|staff|human|agent|real person|a person|speak to someone|talk to someone)\b/.test(strip(text));
 export const wantsMenu = (text: string) => /^(menu|menú|hola|hi|hello|hey|buenas|buen dia|buenos dias|buenas tardes|buenas noches|inicio|start|empezar)[!. ]*$/.test(strip(text));
 export const wantsCancel = (text: string) => /^(cancelar|cancel|salir|exit|reset|empezar de nuevo|start over)[!. ]*$/.test(strip(text));
+/** "quiero hacer una reserva", "reservar", "I need a taxi", "book a transfer"… (a new trip, not an existing one). */
+export const wantsBooking = (text: string) => {
+  const p = strip(text);
+  if (/\b(mi reserva|mis reservas|my booking|cancel)/.test(p)) return false;
+  return /\b(reserv\w*|book\w*|taxi|remis\w*|traslado\w*|transfer\w*|viaje|un auto|un coche|ride|cab)\b/.test(p);
+};
+
 export const wantsStatus = (text: string) => /\b(mi reserva|estado|status|my booking|check booking|consultar)\b/.test(strip(text));
 
 /** Everything that can be read from one message without AI. */
