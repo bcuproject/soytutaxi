@@ -5,6 +5,7 @@ import { Badge, Button, Field, Input, Logo } from "../components/ui";
 import { Radio } from "../components/Radio";
 import { FlightsPanel } from "../components/FlightsPanel";
 import { backend, CommandError, type DriverJob, type DriverMe, type DriverOffer, type DriverStatement, type JobBoard, type StaffSession } from "../lib/backend";
+import { inNativeApp, onNativeLocation, postNative } from "../lib/native";
 import { cx, fmtDateShort, fmtLocalDate, fmtTime, formatMoney } from "../lib/format";
 
 const SEND_EVERY_MS = 15_000;
@@ -53,9 +54,19 @@ function Login({ onDone }: { onDone: (s: StaffSession) => void }) {
           <Button type="submit">Ingresar</Button>
         </form>
       )}
+      {!inNativeApp() && (
+        <a href={DRIVER_APK_URL} className="mt-8 flex items-center gap-3 rounded-2xl border border-cab-500/40 bg-cab-500/10 p-4 text-sm hover:bg-cab-500/20" data-testid="download-apk">
+          <span className="text-2xl" aria-hidden>📲</span>
+          <span><b className="text-white">Descargá la app para Android</b><br />
+            <span className="text-ink-300">Te avisa de viajes nuevos y comparte tu ubicación aunque la pantalla esté apagada.</span></span>
+        </a>
+      )}
     </div>
   );
 }
+
+/** Always the newest build (GitHub release "latest"). */
+export const DRIVER_APK_URL = "https://github.com/bcuproject/soytutaxi/releases/latest/download/soytutaxi-chofer.apk";
 
 export default function DriverApp() {
   const [session, setSession] = useState<StaffSession | null | undefined>(undefined);
@@ -117,6 +128,7 @@ function Driver({ onSignOut }: { onSignOut: () => void }) {
     finally { setBusy(false); refresh(); }
   }
 
+  useNativeSession();
   const gps = useLocationSharing(!!me?.onShift);
 
   if (fatal) return <div className="mx-auto max-w-sm px-5 py-16"><Logo /><p className="mt-6 text-ink-300">{fatal}</p><Button variant="ghost" className="mt-4" onClick={onSignOut}>Salir</Button></div>;
@@ -417,6 +429,20 @@ function JobCard({ job: j, now, busy, act, primary = false }: {
 }
 
 /** Watches GPS while on shift and sends the latest fix every ~15 s; keeps the screen awake. */
+/** Inside the Android app: keep the app's copy of the session current, so it can work with the screen off. */
+function useNativeSession() {
+  useEffect(() => {
+    if (!inNativeApp() || !backend.watchSession) return;
+    const send = (s: { url: string; anonKey: string; accessToken: string; expiresAt: number } | null) =>
+      postNative(s ? { type: "session", ...s } : { type: "logout" });
+    let stop = backend.watchSession(send);
+    // The app asks again when its copy is about to expire (re-reading renews it if needed).
+    const again = () => { stop(); stop = backend.watchSession!(send); };
+    window.addEventListener("stt-native-wants-session", again);
+    return () => { stop(); window.removeEventListener("stt-native-wants-session", again); };
+  }, []);
+}
+
 function useLocationSharing(on: boolean) {
   const [sentAt, setSentAt] = useState<string | null>(null);
   const [accuracy, setAccuracy] = useState<number | null>(null);
@@ -424,7 +450,20 @@ function useLocationSharing(on: boolean) {
   const latest = useRef<GeolocationPosition | null>(null);
   const lastSent = useRef<number>(0);
 
+  // Android app: the app sends the GPS itself (keeps going with the screen off) and tells us how it went.
   useEffect(() => {
+    if (!inNativeApp()) return;
+    postNative({ type: "shift", on });
+    if (!on) { setSentAt(null); setError(null); return; }
+    return onNativeLocation((st) => {
+      if (st.sentAt !== undefined) setSentAt(st.sentAt ?? null);
+      if (st.accuracy !== undefined) setAccuracy(st.accuracy ?? null);
+      if (st.error !== undefined) setError(st.error ?? null);
+    });
+  }, [on]);
+
+  useEffect(() => {
+    if (inNativeApp()) return;
     if (!on) { setSentAt(null); setError(null); return; }
     if (!("geolocation" in navigator)) { setError("Este teléfono no tiene GPS disponible."); return; }
     const id = navigator.geolocation.watchPosition(

@@ -1,0 +1,16 @@
+name: soytutaxi_driver
+description: SoyTuTaxi Chofer — Android app for SoyTuTaxi drivers.
+publish_to: none
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+
+# Versions are picked by `flutter pub add` in the build (see .github/workflows/driver-app.yml),
+# so the build always uses releases that work with the Flutter version it runs.
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true

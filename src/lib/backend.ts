@@ -91,6 +91,8 @@ export interface Backend {
   driverMe(): Promise<DriverMe>;
   setShift(on: boolean): Promise<void>;
   reportLocation(p: { lat: number; lng: number; accuracy?: number | null; heading?: number | null; speed?: number | null; at: string }): Promise<void>;
+  /** Live session for the Android driver app (it reports GPS and checks offers in the background). Live mode only. */
+  watchSession?(cb: (s: { url: string; anonKey: string; accessToken: string; expiresAt: number } | null) => void): () => void;
   driverOffers(): Promise<DriverOffer[]>;
   respondOffer(offerId: string, accept: boolean): Promise<{ outcome: string }>;
   driverJobs(): Promise<DriverJob[]>;
@@ -637,6 +639,13 @@ function camelize<T>(row: Record<string, unknown>): T {
 class SupabaseBackend implements Backend {
   mode = "live" as const;
   private sb: SupabaseClient;
+  watchSession(cb: (s: { url: string; anonKey: string; accessToken: string; expiresAt: number } | null) => void) {
+    const send = (sess: { access_token: string; expires_at?: number } | null) =>
+      cb(sess ? { url: this.url, anonKey: this.anonKey, accessToken: sess.access_token, expiresAt: sess.expires_at ?? 0 } : null);
+    this.sb.auth.getSession().then(({ data }) => send(data.session));
+    const { data } = this.sb.auth.onAuthStateChange((_e, sess) => send(sess));
+    return () => data.subscription.unsubscribe();
+  }
   constructor(private url: string, private anonKey: string) {
     this.sb = createClient(url, anonKey);
   }

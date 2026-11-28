@@ -1,0 +1,64 @@
+name: driver-app
+# Builds the SoyTuTaxi Chofer Android app and publishes it as a GitHub release.
+# Fixed download link: https://github.com/bcuproject/soytutaxi/releases/latest/download/soytutaxi-chofer.apk
+on:
+  push:
+    branches: [main]
+    paths: ["driver-app/**", ".github/workflows/driver-app.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: driver-app
+    env:
+      ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "17" }
+      - uses: subosito/flutter-action@v2
+        with: { channel: stable, cache: true }
+      - name: Create the Android project around lib/ (keeps our manifest)
+        run: flutter create --org app.soytutaxi --project-name soytutaxi_driver --platforms android .
+      - name: Packages (latest versions that fit this Flutter)
+        run: |
+          flutter pub add webview_flutter geolocator flutter_local_notifications http url_launcher
+          flutter pub add --dev flutter_launcher_icons
+      - name: App icon
+        run: |
+          cat >> pubspec.yaml <<'YAML'
+          flutter_launcher_icons:
+            android: true
+            ios: false
+            image_path: assets/icon.png
+            adaptive_icon_background: "#F5C518"
+            adaptive_icon_foreground: assets/icon_fg.png
+          YAML
+          dart run flutter_launcher_icons
+      - name: Signing key
+        if: env.ANDROID_KEYSTORE_B64 != ''
+        run: echo "$ANDROID_KEYSTORE_B64" | base64 -d > android/app/upload.jks
+      - run: python3 tool/patch_android.py
+      - run: flutter analyze --no-fatal-infos --no-fatal-warnings lib
+      - name: Build
+        run: |
+          flutter build apk --release --build-number=${{ github.run_number }} --build-name=1.0.${{ github.run_number }}
+          cp build/app/outputs/flutter-apk/app-release.apk ../soytutaxi-chofer.apk
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: driver-v1.0.${{ github.run_number }}
+          name: SoyTuTaxi Chofer 1.0.${{ github.run_number }}
+          make_latest: "true"
+          files: soytutaxi-chofer.apk
+          body: |
+            App de choferes de SoyTuTaxi para Android.
+            Descarga: https://github.com/bcuproject/soytutaxi/releases/latest/download/soytutaxi-chofer.apk
+            ${{ env.ANDROID_KEYSTORE_B64 == '' && '⚠️ Versión de prueba (firma de prueba): al pasar a la versión definitiva hay que desinstalarla y volver a instalar.' || 'Firmada con la clave de SoyTuTaxi: las actualizaciones se instalan encima.' }}
