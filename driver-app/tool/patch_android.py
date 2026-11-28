@@ -14,7 +14,7 @@ if "isCoreLibraryDesugaringEnabled" not in s:
 if "desugar_jdk_libs" not in s:
     s += '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n'
 s = re.sub(r"minSdk\s*=\s*[^\n]+", "minSdk = 24", s, count=1)
-s = re.sub(r"compileSdk\s*=\s*[^\n]+", "compileSdk = 36", s, count=1)
+s = re.sub(r"compileSdk\s*=\s*[^\n]+", "compileSdk = 37", s, count=1)
 s = re.sub(r"targetSdk\s*=\s*[^\n]+", "targetSdk = 36", s, count=1)
 
 if os.environ.get("ANDROID_KEYSTORE_B64"):
