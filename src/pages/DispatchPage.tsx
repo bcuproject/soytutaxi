@@ -11,6 +11,7 @@ import { FlightsPanel } from "../components/FlightsPanel";
 import { DriversAdmin } from "../components/DriversAdmin";
 import { ReportsPanel } from "../components/ReportsPanel";
 import { AccountsPanel } from "../components/AccountsPanel";
+import { WhatsAppSetup } from "../components/WhatsAppSetup";
 import { cx, fmtDateTime, fmtLocalDate, fmtTime, formatMoney } from "../lib/format";
 import { useConfig } from "./BookingPage";
 
@@ -231,6 +232,7 @@ function Dispatch({ session, onSignOut }: { session: StaffSession; onSignOut: ()
         {tab === "drivers" && <DriversAdmin />}
         {tab === "accounts" && <AccountsPanel />}
         {tab === "reports" && <ReportsPanel />}
+        {tab === "whatsapp" && <WhatsAppConnection />}
         {tab === "whatsapp" && <WhatsAppInbox onCount={setWaPending} onOpenBooking={(ref) => {
           const r = rows.find((x) => x.reference === ref);
           if (r) setSelected(r); else { setQ(ref); setTab("bookings"); }
@@ -597,6 +599,13 @@ function FlightLine({ r }: { r: DispatchRow }) {
       <span className={cx("ml-1", stale ? "text-red-300" : "text-ink-500")}>· {stale ? "datos viejos, " : ""}verificado {fmtTime(r.flightCheckedAt)}</span>
       {r.flightReviewReason && <div className="font-semibold text-red-300">⚠ Revisar: {REVIEW_ES[r.flightReviewReason] ?? r.flightReviewReason}</div>}
     </div>
+  );
+}
+
+function WhatsAppConnection() {
+  const [open, setOpen] = useState(false);
+  return open ? <WhatsAppSetup /> : (
+    <div className="mb-3 flex justify-end"><Button variant="ghost" className="py-1.5 text-sm" onClick={() => setOpen(true)} data-testid="wa-setup-open">⚙️ Conexión de WhatsApp</Button></div>
   );
 }
 

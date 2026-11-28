@@ -142,6 +142,8 @@ export interface Backend {
   joinTransfer(callId: string): Promise<{ url: string; token: string }>;
   /** Previous calls from this number (who answered, Sofía's note and transcript). */
   callerCalls(phone: string): Promise<PastCall[]>;
+  /** WhatsApp connection setup (admin): runs on the server with the stored token. */
+  waSetup(action: string, args?: Record<string, unknown>): Promise<Record<string, any>>;
   accounts(): Promise<Account[]>;
   saveAccount(a: Partial<Account> & { name: string }): Promise<string>;
   setBookingAccount(bookingId: string, version: number, accountId: string | null, ref?: string | null): Promise<void>;
@@ -463,6 +465,7 @@ class DemoBackend implements Backend {
       drivers: [] };
   }
   async joinTransfer(): Promise<{ url: string; token: string }> { throw LIVE_ONLY(); }
+  async waSetup(): Promise<Record<string, any>> { throw LIVE_ONLY(); }
   async callerCalls(phone: string): Promise<PastCall[]> {
     const past = this.calls.filter((c) => c.phone === phone).map((c) => ({ id: c.id, startedAt: c.startedAt, status: c.status, durationS: c.durationS,
       handledBy: c.handledBy, transferred: !!c.transferTakenAt, note: c.botNote, transcript: null, bookingRef: c.bookingRef }));
@@ -834,6 +837,17 @@ class SupabaseBackend implements Backend {
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new CommandError(body?.error?.code ?? "call_error", body?.error?.message);
     return body as { url: string; token: string };
+  }
+  async waSetup(action: string, args: Record<string, unknown> = {}) {
+    const { data } = await this.sb.auth.getSession();
+    if (!data.session) throw new CommandError("unauthenticated");
+    const res = await fetch(`${this.url}/functions/v1/whatsapp/setup`, {
+      method: "POST", headers: { apikey: this.anonKey, authorization: `Bearer ${data.session.access_token}`, "content-type": "application/json" },
+      body: JSON.stringify({ action, args }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new CommandError(body?.error?.code ?? "setup_error", body?.error?.meta?.message ?? body?.error?.message);
+    return body;
   }
   async callerCalls(phone: string): Promise<PastCall[]> {
     const { data, error } = await this.sb.from("wa_calls").select("id, started_at, status, duration_s, handled_by, transfer_taken_at, bot_note, transcript, bookings(reference)")

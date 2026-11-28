@@ -4,6 +4,7 @@
 //   POST /whatsapp/outbox       notification worker, called every minute by pg_cron (x-outbox-key)
 //   POST /whatsapp/staff-send   staff reply from the inbox (Supabase access token; admin, dispatcher or agent)
 //   POST /whatsapp/call-action  answer (SDP), reject or hang up a WhatsApp voice call (same staff check)
+//   POST /whatsapp/setup        WhatsApp connection setup (admin login; outbox key for no-code steps)
 //   POST /whatsapp/call-join    take a call Sofía is transferring: LiveKit token for that call's room (staff)
 //   POST /whatsapp/voice-tool   tools for the voice bot (LiveKit agent on the BCU server), per-call token
 // Voice bot secrets: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET (same LiveKit project as the agent),
@@ -19,6 +20,7 @@ import { graphCalls, graphSender, parseWebhook, verifySignature } from "../_shar
 import type { NotificationContext, TemplateMap } from "../_shared/whatsapp/notify.ts";
 import { liveKitVoiceBot, voiceTool, type VoiceCall } from "../_shared/whatsapp/voice.ts";
 import { mintLiveKitToken } from "../_shared/domain/livekit.ts";
+import { graph, runSetup, type SetupAction } from "../_shared/whatsapp/setup.ts";
 import { callAction, processOutbox, processWebhook, sendAndRecord, type CallRow, type ConversationRow, type ServiceDeps, type WaDb } from "../_shared/whatsapp/service.ts";
 
 function serviceKey(): string {
@@ -48,8 +50,24 @@ const CORS = {
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { ...CORS, "content-type": "application/json" } });
 const log = (o: Record<string, unknown>) => console.log(JSON.stringify({ fn: "whatsapp", ...o }));
 
-let templates: TemplateMap = {};
-try { templates = JSON.parse(env("WHATSAPP_TEMPLATES") || "{}"); } catch { log({ level: "warn", msg: "WHATSAPP_TEMPLATES is not valid JSON" }); }
+let envTemplates: TemplateMap = {};
+try { envTemplates = JSON.parse(env("WHATSAPP_TEMPLATES") || "{}"); } catch { log({ level: "warn", msg: "WHATSAPP_TEMPLATES is not valid JSON" }); }
+const TOKEN = env("WHATSAPP_ACCESS_TOKEN");
+
+/** Number ID, account ID and template names: secrets win; otherwise what the setup screen saved (refreshed every 30 s). */
+const RT: { phoneId: string; wabaId: string; templates: TemplateMap; at: number } = {
+  phoneId: env("WHATSAPP_PHONE_NUMBER_ID"), wabaId: env("WHATSAPP_WABA_ID"), templates: envTemplates, at: 0,
+};
+async function refreshRuntime(force = false) {
+  if (!force && Date.now() - RT.at < 30_000) return;
+  RT.at = Date.now();
+  try {
+    const { data } = await db.rpc("wa_runtime_get");
+    RT.phoneId = env("WHATSAPP_PHONE_NUMBER_ID") || data?.phoneNumberId || "";
+    RT.wabaId = env("WHATSAPP_WABA_ID") || data?.wabaId || "";
+    RT.templates = { ...(data?.templates ?? {}), ...envTemplates };
+  } catch { /* keep the last known values */ }
+}
 
 async function rpc<T>(fn: string, args: Record<string, unknown>): Promise<T> {
   const { data, error } = await db.rpc(fn, args);
@@ -121,8 +139,8 @@ async function staffUser(req: Request) {
   return u?.user ?? null;
 }
 
-const configured = () => !!(env("WHATSAPP_ACCESS_TOKEN") && env("WHATSAPP_PHONE_NUMBER_ID"));
-const sender = graphSender(env("WHATSAPP_PHONE_NUMBER_ID"), env("WHATSAPP_ACCESS_TOKEN"));
+const configured = () => !!(TOKEN && RT.phoneId);
+const sender = { send: (to: string, m: Parameters<ReturnType<typeof graphSender>["send"]>[1]) => graphSender(RT.phoneId, TOKEN).send(to, m) };
 const ai = env("AI_API_KEY")
   ? makeExtractor({ apiKey: env("AI_API_KEY"), baseUrl: env("AI_BASE_URL") || undefined, model: env("AI_MODEL") || undefined })
   : null;
@@ -132,12 +150,15 @@ const assistant = env("AI_API_KEY")
   : null;
 
 const deps: ServiceDeps = {
-  db: waDb, store, sender, ai, assistant, log, templates, statusTokenSecret: STATUS_SECRET, publicAppUrl: PUBLIC_APP_URL,
-  calls: configured() ? graphCalls(env("WHATSAPP_PHONE_NUMBER_ID"), env("WHATSAPP_ACCESS_TOKEN")) : undefined,
-  voiceBot: configured() && env("LIVEKIT_URL") && env("LIVEKIT_API_KEY") && env("LIVEKIT_API_SECRET")
-    ? liveKitVoiceBot({ url: env("LIVEKIT_URL"), apiKey: env("LIVEKIT_API_KEY"), apiSecret: env("LIVEKIT_API_SECRET"),
-        phoneNumberId: env("WHATSAPP_PHONE_NUMBER_ID"), waToken: env("WHATSAPP_ACCESS_TOKEN") })
-    : undefined,
+  db: waDb, store, sender, ai, assistant, log, statusTokenSecret: STATUS_SECRET, publicAppUrl: PUBLIC_APP_URL,
+  get templates() { return RT.templates; },
+  get calls() { return configured() ? graphCalls(RT.phoneId, TOKEN) : undefined; },
+  get voiceBot() {
+    return configured() && env("LIVEKIT_URL") && env("LIVEKIT_API_KEY") && env("LIVEKIT_API_SECRET")
+      ? liveKitVoiceBot({ url: env("LIVEKIT_URL"), apiKey: env("LIVEKIT_API_KEY"), apiSecret: env("LIVEKIT_API_SECRET"),
+          phoneNumberId: RT.phoneId, waToken: TOKEN })
+      : undefined;
+  },
   voiceSecret: env("VOICE_TOKEN_SECRET") || `voice:${KEY}`,
   voiceToolUrl: `${SUPABASE_URL.replace(/\/$/, "")}/functions/v1/whatsapp/voice-tool`,
   async config() {
@@ -154,6 +175,7 @@ Deno.serve(async (req) => {
   const url = new URL(req.url);
   const path = url.pathname.replace(/\/+$/, "");
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+  await refreshRuntime();
 
   // --- Meta verification handshake
   if (req.method === "GET") {
@@ -208,6 +230,38 @@ Deno.serve(async (req) => {
     return json(r.status, r.body);
   }
 
+  // --- WhatsApp connection setup (Graph API with the stored token; the token never leaves the server).
+  // Admin login for every step; the outbox key (server-to-server) for the steps that need no code or PIN.
+  if (path.endsWith("/setup")) {
+    const body = await req.json().catch(() => ({}));
+    const action = String(body?.action ?? "") as SetupAction;
+    let userId: string | null = null;
+    const user = await staffUser(req);
+    if (user) {
+      const { data } = await db.from("memberships").select("role").eq("user_id", user.id).eq("active", true).eq("role", "admin");
+      if (!data?.length) return json(403, { error: { code: "forbidden" } });
+      userId = user.id;
+    } else {
+      const keyOk = await rpc<boolean>("wa_outbox_key_ok", { p_key: req.headers.get("x-outbox-key") ?? "" }).catch(() => false);
+      if (!keyOk) return json(401, { error: { code: "unauthenticated" } });
+      if (!["status", "use_number", "webhook", "calling", "templates"].includes(action)) return json(403, { error: { code: "admin_required" } });
+    }
+    await refreshRuntime(true);
+    const r = await runSetup(action, body?.args ?? {}, {
+      token: TOKEN, callbackUrl: `${SUPABASE_URL.replace(/\/$/, "")}/functions/v1/whatsapp`,
+      verifyToken: env("WHATSAPP_VERIFY_TOKEN"), wabaId: RT.wabaId, phoneNumberId: RT.phoneId,
+    }, graph(TOKEN));
+    if (r.save) {
+      await rpc("wa_runtime_set", { p_phone: r.save.phoneNumberId ?? null, p_waba: r.save.wabaId ?? null,
+        p_templates: r.save.templates ?? null, p_user: userId });
+      await refreshRuntime(true);
+    }
+    log({ level: r.ok ? "info" : "warn", setup: action, ok: r.ok, by: userId ? "admin" : "server" });
+    return json(r.status, { ...r.body, secrets: { accessToken: !!TOKEN, appSecret: !!env("WHATSAPP_APP_SECRET"), verifyToken: !!env("WHATSAPP_VERIFY_TOKEN"),
+      liveKit: !!(env("LIVEKIT_URL") && env("LIVEKIT_API_KEY") && env("LIVEKIT_API_SECRET")), ai: !!env("AI_API_KEY") },
+      connected: { phoneNumberId: RT.phoneId || null, wabaId: RT.wabaId || null, templates: Object.keys(RT.templates).length } });
+  }
+
   // --- A desk agent takes a call Sofía is transferring: joins the call's LiveKit room from the browser.
   if (path.endsWith("/call-join")) {
     const user = await staffUser(req);
@@ -254,7 +308,7 @@ Deno.serve(async (req) => {
   }
   let parsed;
   try { parsed = parseWebhook(JSON.parse(raw)); } catch { return json(400, { error: { code: "bad_payload" } }); }
-  const expected = env("WHATSAPP_PHONE_NUMBER_ID");
+  const expected = RT.phoneId;
   if (expected && parsed.phoneNumberId && parsed.phoneNumberId !== expected) return json(200, { ignored: "other_number" });
 
   // Acknowledge fast (Meta retries slow webhooks); work continues in the background.
